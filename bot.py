@@ -110,19 +110,34 @@ async def upload_as_document(update: Update, context: ContextTypes.DEFAULT_TYPE,
     msg = await update.message.reply_text("Uploading as document...")
 
     try:
+        # Open file in binary mode
         with open(file_path, "rb") as f:
+            # Create InputFile with explicit filename
+            input_file = InputFile(f, filename=filename or file_path.name)
+
+            # Send via bot.send_document with timeout
             await context.bot.send_document(
                 chat_id=update.effective_chat.id,
-                document=InputFile(f, filename=filename or file_path.name),
-                caption=caption,
+                document=input_file,
+                caption=caption[:1024],  # Telegram limit
+                filename=filename or file_path.name,
+                read_timeout=60,
+                write_timeout=60,
+                connect_timeout=60,
+                pool_timeout=60,
                 message_thread_id=update.effective_message.message_thread_id if update.effective_message.is_topic_message else None
             )
+
+        # Delete file after success
         os.remove(file_path)
         await msg.delete()
+
     except Exception as e:
-        await msg.edit_text(f"Upload failed: {e}")
+        error_msg = str(e)
+        await msg.edit_text(f"Upload failed: {error_msg}")
         if file_path.exists():
-            os.remove(file_path)
+            try: os.remove(file_path)
+            except: pass
 
 # --- YouTube Handler (WITH COOKIES) ---
 async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
@@ -140,7 +155,7 @@ async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, url
         ydl_opts['cookiefile'] = cookies_path
         logger.info("Using cookies.txt")
     else:
-        await msg.edit_text("Warning: cookies.txt missing. Limited access.")
+        await msg.edit_text("cookies.txt missing. Limited access.")
         ydl_opts['format'] = 'best[height<=720]'
 
     try:
@@ -166,7 +181,7 @@ async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, url
     except Exception as e:
         error_msg = str(e)
         if "Sign in" in error_msg or "bot" in error_msg.lower():
-            await msg.edit_text("Warning: YouTube blocked. Update cookies.txt (log in first).")
+            await msg.edit_text("YouTube blocked. Update cookies.txt (log in first).")
         else:
             await msg.edit_text(f"Error: {error_msg}")
 
