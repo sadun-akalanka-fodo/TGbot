@@ -96,7 +96,7 @@ def format_size(size: int) -> str:
     return f"{size:.2f} TB"
 
 # --- UPLOAD AS DOCUMENT (2 GB SAFE) ---
-async def upload_as_document(update: Update, file_path: Path, caption: str = "", filename: str = None):
+async def upload_as_document(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, caption: str = "", filename: str = None):
     if not file_path.exists():
         await update.message.reply_text("File missing.")
         return
@@ -111,9 +111,11 @@ async def upload_as_document(update: Update, file_path: Path, caption: str = "",
 
     try:
         with open(file_path, "rb") as f:
-            await update.message.reply_document(
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
                 document=InputFile(f, filename=filename or file_path.name),
-                caption=caption
+                caption=caption,
+                message_thread_id=update.effective_message.message_thread_id if update.effective_message.is_topic_message else None
             )
         os.remove(file_path)
         await msg.delete()
@@ -159,7 +161,7 @@ async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, url
                 ydl.download([url])
 
             caption = f"{title}\nFrom: {url}"
-            await upload_as_document(update, temp_path, caption, f"{title}.mp4")
+            await upload_as_document(update, context, temp_path, caption, f"{title}.mp4")
 
     except Exception as e:
         error_msg = str(e)
@@ -205,7 +207,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = f"From: {url}"
 
         if file_size > MEDIA_THRESHOLD or category in ['document']:
-            await upload_as_document(update, file_path, caption, file_path.name)
+            await upload_as_document(update, context, file_path, caption, file_path.name)
         else:
             with open(file_path, "rb") as f:
                 if category == "video":
