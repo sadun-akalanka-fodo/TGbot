@@ -4,3 +4,4 @@ hachoir
 mutagen
 tinydb
 aiohttp
+python-dotenv
