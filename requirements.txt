@@ -6,3 +6,4 @@ tinydb
 aiohttp
 python-dotenv
 yt-dlp
+ffmpeg-python
