@@ -20,7 +20,7 @@ from telegram.constants import ParseMode
 from PIL import Image
 from PIL.ExifTags import TAGS
 from hachoir.parser import createParser
-from hachoir-metadata import extractMetadata
+from hachoir.metadata import extractMetadata  # FIXED: hachoir.metadata
 from mutagen import File as MutagenFile
 
 # --- TinyDB ---
@@ -228,7 +228,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         context.user_data["state"] = None
 
-# --- Cloud Storage (same as before) ---
+# --- Cloud Storage ---
 async def cloud_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Save File", callback_data="cloud_save")],
