@@ -465,19 +465,17 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         
         # Send all parts
         for idx, part_file in enumerate(parts, 1):
-            part_size = part_file.stat().st_size
-            caption = f"📹 Part {idx}/{len(parts)} - {format_file_size(part_size)}"
-            
+            part_size_bytes = part_file.stat().st_size
             with open(part_file, 'rb') as f:
-                await context.bot.send_video(
+                await context.bot.send_document(
                     chat_id=update.effective_chat.id,
-                    video=f,
-                    caption=caption,
-                    supports_streaming=True
+                    document=f,
+                    caption=f"Part {idx}/{len(parts)} - {format_file_size(part_size_bytes)}",
+                    write_timeout=180,   # 3 minutes upload time
+                    read_timeout=180     # 3 minutes response wait
                 )
-            
-            # Cleanup part after sending
             cleanup_file(part_file)
+
         
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
