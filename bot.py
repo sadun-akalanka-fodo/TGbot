@@ -2,22 +2,19 @@
 import asyncio
 import os
 import re
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict
 
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    MessageEntity
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
 
 # --- Metadata Libraries ---
 from PIL import Image
@@ -31,7 +28,7 @@ from tinydb import TinyDB, Query
 from tinydb.storages import JSONStorage
 from tinydb.middlewares import CachingMiddleware
 
-# --- .env support (local only) ---
+# --- .env (local only) ---
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -53,8 +50,7 @@ DATA_DIR.mkdir(exist_ok=True)
 
 # --- Database ---
 UserQuery = Query()
-db = TinyDB(DATA_DIR / "storage.tiny", storage=CachingMiddleware(JSONStorage))
-users_db = TinyDB(DATA_DIR / "users.json")
+users_db = TinyDB(DATA_DIR / "users.json", storage=CachingMiddleware(JSONStorage))
 
 # --- Constants ---
 MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -70,7 +66,7 @@ PAGE_SIZE = 5
 def get_user_data(user_id: int) -> Dict:
     user = users_db.get(UserQuery.id == user_id)
     if not user:
-        user = {"id": user_id, "files": [], "rules": [], "state": None, "temp": {}}
+        user = {"id": user_id, "files": [], "rules": [], "state": None}
         users_db.insert(user)
     return user
 
@@ -101,7 +97,7 @@ def format_duration(seconds: float) -> str:
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-# --- Menus ---
+# --- Main Menu ---
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Downloader", callback_data="downloader")],
@@ -150,7 +146,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if size == 0:
                 await msg.edit_text("Size unknown.")
                 return
-    except Exception as e:
+    except:
         await msg.edit_text("Failed to check URL.")
         return
 
@@ -291,7 +287,7 @@ async def cloud_wipe_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(1)
     await cloud_menu(update, context)
 
-# --- Inspector ---
+# --- Metadata Inspector ---
 async def inspector_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(
         "Send a file to analyze.",
@@ -351,7 +347,7 @@ async def handle_inspector_file(update: Update, context: ContextTypes.DEFAULT_TY
         await msg.edit_text(f"Error: {e}")
     context.user_data["state"] = None
 
-# --- Rules ---
+# --- Auto-Forward Rules ---
 async def rules_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Add Rule", callback_data="rule_add")],
@@ -360,7 +356,7 @@ async def rules_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.callback_query.edit_message_text("Auto-Forward Rules", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async conduct_rule_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def rule_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(
         "Format: `keyword | chat_id`\nExample: `report | -1001234567890`",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="rules")]]),
@@ -421,7 +417,7 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Sent to {sent} users.")
     context.user_data["state"] = None
 
-# --- Callback ---
+# --- Callback Handler ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -437,7 +433,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "cloud_wipe_yes": await cloud_wipe_yes(update, context)
     elif d == "inspector": await inspector_menu(update, context)
     elif d == "rules": await rules_menu(update, context)
-    elif d == "rule_add": await conduct_rule_add(update, context)
+    elif d == "rule_add": await rule_add(update, context)
     elif d == "rule_list": await rule_list(update, context)
     elif d.startswith("rule_toggle_"):
         idx = int(d.split("_")[-1])
