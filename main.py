@@ -4,10 +4,10 @@ Telegram Video Downloader Bot
 
 Features:
 - Download videos from YouTube, TikTok, Instagram, Twitter, and other platforms
-- Quality selection (720p, 480p, 360p, or MP3 audio)
+- Quality selection (1080p, 720p, 480p, 360p, or MP3 audio)
 - Video-to-audio conversion
-- Automatic file splitting for files larger than 50 MB
-- User-friendly button-based interface (no slash commands)
+- Automatic file splitting for files larger than 50 MB (49MB parts)
+- User-friendly button-based interface with main menu
 """
 
 import os
@@ -19,7 +19,7 @@ import zipfile
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB in bytes
+PART_SIZE = 49 * 1024 * 1024  # 49 MB per part
 TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB (Telegram limit)
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -58,6 +59,16 @@ SUPPORTED_PLATFORMS = [
 
 # Store user session data
 user_sessions: Dict[int, Dict[str, Any]] = {}
+
+
+def get_main_menu_keyboard():
+    """Create the main menu keyboard."""
+    keyboard = [
+        [KeyboardButton("📹 Download Video")],
+        [KeyboardButton("🎵 Convert Video to MP3")],
+        [KeyboardButton("❓ Help")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
 def is_video_url(text: str) -> bool:
@@ -102,27 +113,71 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send welcome message when /start command is issued."""
     welcome_message = (
         "👋 Welcome to the Video Downloader Bot!\n\n"
-        "📹 Send me a video link from:\n"
-        "• YouTube\n"
-        "• TikTok\n"
-        "• Instagram\n"
-        "• Twitter/X\n"
-        "• Facebook\n"
-        "• And many more!\n\n"
-        "🎵 I can also convert videos to MP3 audio.\n\n"
-        "Just send me a link and I'll guide you through the rest!"
+        "Choose what you want to do:\n\n"
+        "📹 Download Video - Download from YouTube, TikTok, Instagram, etc.\n"
+        "🎵 Convert Video to MP3 - Convert any video file to MP3 audio\n\n"
+        "Select an option from the menu below!"
     )
-    await update.message.reply_text(welcome_message)
+    await update.message.reply_text(
+        welcome_message,
+        reply_markup=get_main_menu_keyboard()
+    )
 
 
-async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle video URL and show quality options."""
+async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle main menu button selections."""
+    if not update.effective_user or not update.message:
+        return
+    
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if text == "📹 Download Video":
+        # Set user mode to download
+        user_sessions[user_id] = {'mode': 'download'}
+        await update.message.reply_text(
+            "📹 Video Download Mode\n\n"
+            "Send me a video link from:\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• Instagram\n"
+            "• Twitter/X\n"
+            "• Facebook\n"
+            "• Vimeo\n"
+            "• And many more!\n\n"
+            "Just paste the link and I'll help you download it!"
+        )
+    
+    elif text == "🎵 Convert Video to MP3":
+        # Set user mode to convert
+        user_sessions[user_id] = {'mode': 'convert'}
+        await update.message.reply_text(
+            "🎵 Video to MP3 Converter\n\n"
+            "Send me any video file and I'll convert it to MP3 audio for you!\n\n"
+            "Just upload the video file."
+        )
+    
+    elif text == "❓ Help":
+        await help_command(update, context)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle text messages (URLs)."""
     if not update.effective_user or not update.message:
         return
     
     user_id = update.effective_user.id
     message_text = update.message.text
     
+    # Check if user has selected download mode
+    if user_id not in user_sessions or user_sessions[user_id].get('mode') != 'download':
+        await update.message.reply_text(
+            "Please select an option from the menu first!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    # Check if it's a video URL
     if not is_video_url(message_text):
         await update.message.reply_text(
             "❌ This doesn't look like a supported video URL.\n"
@@ -145,19 +200,23 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     # Store video URL and info in user session
     user_sessions[user_id] = {
+        'mode': 'download',
         'url': message_text,
         'video_info': video_info,
         'title': video_info.get('title', 'Unknown'),
     }
     
-    # Create quality selection keyboard
+    # Create quality selection keyboard with 1080p option
     keyboard = [
         [
+            InlineKeyboardButton("📺 1080p (Full HD)", callback_data="quality_1080"),
             InlineKeyboardButton("📺 720p (HD)", callback_data="quality_720"),
-            InlineKeyboardButton("📺 480p", callback_data="quality_480"),
         ],
         [
+            InlineKeyboardButton("📺 480p", callback_data="quality_480"),
             InlineKeyboardButton("📺 360p", callback_data="quality_360"),
+        ],
+        [
             InlineKeyboardButton("🎵 MP3 Audio", callback_data="quality_audio"),
         ],
     ]
@@ -196,6 +255,7 @@ async def handle_quality_selection(update: Update, context: ContextTypes.DEFAULT
     
     # Show downloading message
     quality_text = {
+        '1080': '1080p Full HD',
         '720': '720p HD',
         '480': '480p',
         '360': '360p',
@@ -238,7 +298,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     else:
         output_path = DOWNLOAD_DIR / f"{safe_filename}.mp4"
         # Map quality to height
-        height_map = {'720': 720, '480': 480, '360': 360}
+        height_map = {'1080': 1080, '720': 720, '480': 480, '360': 360}
         max_height = height_map.get(quality, 720)
         
         ydl_opts = {
@@ -297,8 +357,8 @@ async def handle_large_file(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_sessions[user_id] = session
     
     keyboard = [
-        [InlineKeyboardButton("📹 Split into Video Parts", callback_data="split_video")],
-        [InlineKeyboardButton("🗜️ Split into ZIP Parts", callback_data="split_zip")],
+        [InlineKeyboardButton("📹 Split into Video Parts (49MB each)", callback_data="split_video")],
+        [InlineKeyboardButton("🗜️ Split into ZIP Parts (49MB each)", callback_data="split_zip")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -338,14 +398,11 @@ async def handle_split_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, file_size: int) -> None:
-    """Split video into multiple parts using ffmpeg."""
+    """Split video into multiple 49MB parts using ffmpeg with file size limit."""
     parts = []  # Track all created parts for cleanup
     
     try:
-        # Calculate duration of each part (approximately 40 MB per part)
-        part_size_mb = 45  # MB per part
-        
-        # Get video duration
+        # Get video duration to calculate approximate number of parts
         cmd = [
             'ffprobe', '-v', 'error', '-show_entries', 
             'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', 
@@ -354,32 +411,57 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         result = subprocess.run(cmd, capture_output=True, text=True)
         total_duration = float(result.stdout.strip())
         
-        # Calculate number of parts
-        num_parts = max(2, int((file_size / (1024 * 1024)) / part_size_mb) + 1)
-        part_duration = total_duration / num_parts
+        # Estimate number of parts
+        estimated_parts = max(2, (file_size // PART_SIZE) + 1)
         
         await update.callback_query.edit_message_text(
-            f"✂️ Splitting video into {num_parts} parts...\n\n"
+            f"✂️ Splitting video into parts (49MB each)...\n\n"
             "This may take a while..."
         )
         
-        # Split video using ffmpeg
-        for i in range(num_parts):
-            start_time = i * part_duration
-            output_file = file_path.parent / f"{file_path.stem}_part{i+1}{file_path.suffix}"
+        # Split video using ffmpeg with file size limit
+        current_time = 0
+        part_num = 1
+        
+        while current_time < total_duration:
+            output_file = file_path.parent / f"{file_path.stem}_part{part_num}{file_path.suffix}"
             
+            # Use -fs flag to limit file size to 49MB
             cmd = [
                 'ffmpeg', '-i', str(file_path),
-                '-ss', str(start_time),
-                '-t', str(part_duration),
+                '-ss', str(current_time),
+                '-fs', '49M',  # Limit file size to 49MB
                 '-c', 'copy',
                 '-avoid_negative_ts', '1',
                 str(output_file)
             ]
             
-            subprocess.run(cmd, capture_output=True)
-            if output_file.exists():
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if output_file.exists() and output_file.stat().st_size > 0:
                 parts.append(output_file)
+                
+                # Get duration of the created part to calculate next start time
+                cmd_duration = [
+                    'ffprobe', '-v', 'error', '-show_entries',
+                    'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
+                    str(output_file)
+                ]
+                part_duration_result = subprocess.run(cmd_duration, capture_output=True, text=True)
+                try:
+                    part_duration = float(part_duration_result.stdout.strip())
+                    current_time += part_duration
+                except:
+                    # If we can't get duration, break to avoid infinite loop
+                    break
+                
+                part_num += 1
+            else:
+                break
+            
+            # Safety check to prevent infinite loop
+            if part_num > 100:
+                break
         
         # Send all parts
         for idx, part_file in enumerate(parts, 1):
@@ -423,7 +505,7 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, file_size: int) -> None:
-    """Split file into ZIP parts."""
+    """Split file into 49MB ZIP parts."""
     zip_path = file_path.parent / f"{file_path.stem}.zip"
     parts = []  # Track all created parts for cleanup
     
@@ -436,16 +518,14 @@ async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, fi
         
         zip_size = zip_path.stat().st_size
         
-        # If ZIP is still too large, split it
+        # If ZIP is still too large, split it into 49MB parts
         if zip_size > MAX_FILE_SIZE:
-            await update.callback_query.edit_message_text("✂️ Splitting ZIP into parts...")
-            
-            part_size = 45 * 1024 * 1024  # 45 MB per part
+            await update.callback_query.edit_message_text("✂️ Splitting ZIP into 49MB parts...")
             
             with open(zip_path, 'rb') as f:
                 part_num = 1
                 while True:
-                    chunk = f.read(part_size)
+                    chunk = f.read(PART_SIZE)
                     if not chunk:
                         break
                     
@@ -457,7 +537,7 @@ async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, fi
             
             # Send all parts with instructions
             instructions = (
-                "📦 ZIP archive split into parts\n\n"
+                "📦 ZIP archive split into 49MB parts\n\n"
                 f"Total parts: {len(parts)}\n\n"
                 "To combine:\n"
                 "1. Download all parts\n"
@@ -545,20 +625,20 @@ async def send_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_pat
         )
 
 
-async def handle_video_to_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle video-to-audio conversion requests."""
-    await update.message.reply_text(
-        "🎵 Video to Audio Converter\n\n"
-        "Please send me a video file, and I'll convert it to MP3 for you!"
-    )
-
-
 async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle video files sent by user for conversion."""
     if not update.effective_user or not update.message or not update.message.video:
         return
     
     user_id = update.effective_user.id
+    
+    # Check if user is in convert mode
+    if user_id not in user_sessions or user_sessions[user_id].get('mode') != 'convert':
+        await update.message.reply_text(
+            "Please select 🎵 Convert Video to MP3 from the menu first!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
     
     # Show processing message
     processing_msg = await update.message.reply_text("⏳ Downloading your video...")
@@ -622,11 +702,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Send help message."""
     help_text = (
         "📚 How to use this bot:\n\n"
-        "1️⃣ Send a video link from YouTube, TikTok, Instagram, etc.\n"
-        "2️⃣ Choose the quality you want (or MP3 for audio only)\n"
-        "3️⃣ Receive your file!\n\n"
-        "🎵 Video to Audio:\n"
-        "Send me any video file, and I'll convert it to MP3!\n\n"
+        "📹 Download Video:\n"
+        "1️⃣ Select 'Download Video' from the menu\n"
+        "2️⃣ Send a video link from YouTube, TikTok, Instagram, etc.\n"
+        "3️⃣ Choose quality (1080p, 720p, 480p, 360p, or MP3)\n"
+        "4️⃣ Receive your file!\n\n"
+        "🎵 Convert Video to MP3:\n"
+        "1️⃣ Select 'Convert Video to MP3' from the menu\n"
+        "2️⃣ Upload any video file\n"
+        "3️⃣ Receive MP3 audio!\n\n"
         "Supported platforms:\n"
         "• YouTube\n"
         "• TikTok\n"
@@ -636,7 +720,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Vimeo\n"
         "• And many more!"
     )
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, reply_markup=get_main_menu_keyboard())
 
 
 def main() -> None:
@@ -661,10 +745,16 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     
-    # Handle video URLs
+    # Handle menu button selections
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, 
-        handle_video_url
+        filters.Regex("^(📹 Download Video|🎵 Convert Video to MP3|❓ Help)$"),
+        handle_menu_choice
+    ))
+    
+    # Handle video URLs (only in download mode)
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(📹 Download Video|🎵 Convert Video to MP3|❓ Help)$"),
+        handle_message
     ))
     
     # Handle video files for conversion
