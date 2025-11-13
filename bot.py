@@ -5,8 +5,10 @@ import re
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 import zipfile
+import subprocess
+import shutil
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
@@ -16,6 +18,7 @@ from telegram.ext import (
     ContextTypes, filters
 )
 from telegram.constants import ParseMode
+from telegram.error import Conflict
 
 # --- Libraries ---
 from PIL import Image
@@ -38,7 +41,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 if not BOT_TOKEN or ADMIN_ID == 0:
-    raise ValueError("Set BOT_TOKEN & ADMIN_ID in .env or Railway!")
+    raise ValueError("Set BOT_TOKEN & ADMIN_ID!")
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -51,12 +54,6 @@ users_db = TinyDB(DATA_DIR / "users.json", storage=CachingMiddleware(JSONStorage
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 MEDIA_THRESHOLD = 50 * 1024 * 1024      # 50 MB
 PAGE_SIZE = 5
-SUPPORTED_EXTS = {
-    'video': ('.mp4', '.mkv', '.avi', '.mov', '.webm'),
-    'audio': ('.mp3', '.wav', '.ogg', '.m4a', '.flac'),
-    'image': ('.jpg', '.jpeg', '.png', '.webp', '.bmp'),
-    'document': ('.pdf', '.zip', '.txt', '.docx', '.xlsx', '.pptx')
-}
 
 # --- Helpers ---
 def get_user_data(user_id: int) -> Dict:
@@ -64,6 +61,8 @@ def get_user_data(user_id: int) -> Dict:
     if not user:
         user = {"id": user_id, "files": [], "rules": [], "state": None, "temp": {}}
         users_db.insert(user)
+    if "temp" not in user:
+        user["temp"] = {}
     return user
 
 def save_user_data(user_id: int, data: Dict):
@@ -74,6 +73,23 @@ def format_size(size: int) -> str:
         if size < 1024: return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} TB"
+
+def is_direct_file_url(url: str) -> tuple[bool, str, str]:
+    if not url.startswith(('http://', 'https://')):
+        return False, "", ""
+    match = re.search(r'\.([a-zA-Z0-9]+)(\?.*)?(#.*)?$', url)
+    if not match:
+        return False, "", ""
+    ext = '.' + match.group(1).lower()
+    for cat, exts in {
+        'video': ('.mp4', '.mkv', '.avi', '.mov', '.webm'),
+        'audio': ('.mp3', '.wav', '.ogg', '.m4a', '.flac'),
+        'image': ('.jpg', '.jpeg', '.png', '.webp', '.bmp'),
+        'document': ('.pdf', '.zip', '.txt', '.docx', '.xlsx', '.pptx')
+    }.items():
+        if ext in exts:
+            return True, ext, cat
+    return False, "", ""
 
 # --- UPLOAD AS DOCUMENT (2 GB SAFE) ---
 async def upload_as_document(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, caption: str = "", filename: str = None):
@@ -87,7 +103,7 @@ async def upload_as_document(update: Update, context: ContextTypes.DEFAULT_TYPE,
         os.remove(file_path)
         return
 
-    msg = await update.effective_message.reply_text("Uploading as document...")
+    msg = await update.effective_message.reply_text("Uploading...")
 
     try:
         with open(file_path, "rb") as f:
@@ -107,76 +123,74 @@ async def upload_as_document(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except Exception as e:
         await msg.edit_text(f"Upload failed: {e}")
         if file_path.exists():
-            os.remove(file_path)
+            try: os.remove(file_path)
+            except: pass
 
-# --- Split Video into Parts (<50MB) ---
+# --- Split Video into Parts ---
 async def split_and_send_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, title: str):
-    msg = await update.effective_message.reply_text("Splitting into parts...")
+    msg = await update.effective_message.reply_text("Splitting...")
     part_dir = DATA_DIR / f"parts_{update.effective_user.id}_{int(datetime.now().timestamp())}"
     part_dir.mkdir(exist_ok=True)
 
     try:
-        import subprocess
         cmd = [
             'ffmpeg', '-i', str(file_path),
-            '-f', 'segment',
-            '-segment_time', '180',  # ~3 min per part
-            '-c', 'copy',
-            '-reset_timestamps', '1',
+            '-f', 'segment', '-segment_time', '180',
+            '-c', 'copy', '-reset_timestamps', '1',
             str(part_dir / "part_%03d.mp4")
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
+        subprocess.run(cmd, check=True, capture_output=True)
         parts = sorted(part_dir.glob("part_*.mp4"))
-        for i, part in enumerate(parts):
-            await upload_as_document(update, context, part, f"{title} [Part {i+1}/{len(parts)}]", part.name)
+        for i, p in enumerate(parts):
+            await upload_as_document(update, context, p, f"{title} [Part {i+1}/{len(parts)}]", p.name)
         await msg.edit_text(f"Sent {len(parts)} parts.")
     except Exception as e:
         await msg.edit_text(f"Split failed: {e}")
     finally:
-        import shutil
         if part_dir.exists():
             shutil.rmtree(part_dir)
 
-# --- Zip File into Parts (<50MB) ---
+# --- Zip into Parts ---
 async def zip_and_send_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, title: str):
-    msg = await update.effective_message.reply_text("Zipping into parts...")
+    msg = await update.effective_message.reply_text("Zipping...")
     zip_dir = DATA_DIR / f"zip_{update.effective_user.id}_{int(datetime.now().timestamp())}"
     zip_dir.mkdir(exist_ok=True)
 
     try:
-        max_part_size = 45 * 1024 * 1024  # 45 MB
-        with zipfile.ZipFile(file_path, 'r') as zf:
-            part_num = 1
-            current_zip_path = zip_dir / f"{title}_part{part_num}.zip"
-            current_zip = zipfile.ZipFile(current_zip_path, 'w', zipfile.ZIP_DEFLATED)
-            current_size = 0
+        max_part_size = 45 * 1024 * 1024
+        part_num = 1
+        current_zip_path = zip_dir / f"{title}_part{part_num}.zip"
+        current_zip = zipfile.ZipFile(current_zip_path, 'w', zipfile.ZIP_DEFLATED)
+        current_size = 0
 
-            for file_info in zf.infolist():
-                if file_info.filename.endswith('/'): continue
-                data = zf.read(file_info)
-                if current_size + len(data) > max_part_size:
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(1024*1024)
+                if not chunk: break
+                if current_size + len(chunk) > max_part_size:
                     current_zip.close()
                     await upload_as_document(update, context, current_zip_path, f"{title} [Part {part_num}]", current_zip_path.name)
                     part_num += 1
                     current_zip_path = zip_dir / f"{title}_part{part_num}.zip"
                     current_zip = zipfile.ZipFile(current_zip_path, 'w', zipfile.ZIP_DEFLATED)
                     current_size = 0
-                current_zip.writestr(file_info, data)
-                current_size += len(data)
-            current_zip.close()
-            await upload_as_document(update, context, current_zip_path, f"{title} [Part {part_num}]", current_zip_path.name)
+                current_zip.writestr(file_path.name, chunk)
+                current_size += len(chunk)
+        current_zip.close()
+        await upload_as_document(update, context, current_zip_path, f"{title} [Part {part_num}]", current_zip_path.name)
         await msg.edit_text(f"Sent {part_num} zip parts.")
     except Exception as e:
         await msg.edit_text(f"Zip failed: {e}")
     finally:
-        import shutil
         if zip_dir.exists():
             shutil.rmtree(zip_dir)
 
-# --- YouTube Quality Selector ---
+# --- YouTube Quality ---
 async def ask_youtube_quality(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-    context.user_data["temp"]["yt_url"] = url
+    user = get_user_data(update.effective_user.id)
+    user["temp"]["yt_url"] = url
+    save_user_data(update.effective_user.id, user)
+
     keyboard = [
         [InlineKeyboardButton("1080p Video", callback_data="yt_1080")],
         [InlineKeyboardButton("720p Video", callback_data="yt_720")],
@@ -185,25 +199,21 @@ async def ask_youtube_quality(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("Cancel", callback_data="cancel")]
     ]
     await update.effective_message.reply_text(
-        "Choose download quality:",
+        "Choose quality:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 # --- Handle YouTube Download ---
 async def handle_youtube_download(update: Update, context: ContextTypes.DEFAULT_TYPE, quality: str):
-    url = context.user_data["temp"].get("yt_url")
+    user = get_user_data(update.effective_user.id)
+    url = user["temp"].get("yt_url")
     if not url:
-        await update.callback_query.edit_message_text("Error: URL missing.")
+        await update.callback_query.edit_message_text("URL expired.")
         return
 
-    msg = await update.callback_query.edit_message_text("Fetching info...")
+    msg = await update.callback_query.edit_message_text("Fetching...")
     cookies_path = "cookies.txt"
-    ydl_opts = {
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-    }
-
+    ydl_opts = {'noplaylist': True, 'quiet': True, 'no_warnings': True}
     if os.path.exists(cookies_path):
         ydl_opts['cookiefile'] = cookies_path
 
@@ -247,18 +257,20 @@ async def handle_youtube_download(update: Update, context: ContextTypes.DEFAULT_
                     [InlineKeyboardButton("Cancel", callback_data="cancel")]
                 ]
                 await msg.edit_text(
-                    f"File is {format_size(file_size)} (>50MB)\nChoose how to send:",
+                    f"File is {format_size(file_size)} (>50MB)\nChoose:",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
-                context.user_data["temp"]["pending_file"] = str(temp_path)
+                user["temp"]["pending_file"] = str(temp_path)
+                save_user_data(update.effective_user.id, user)
             else:
                 await upload_as_document(update, context, temp_path, caption, f"{title}{ext}")
 
     except Exception as e:
         await msg.edit_text(f"Error: {e}")
 
-# --- Handle Split/Zip Choice ---
+# --- Handle Split/Zip ---
 async def handle_split_choice(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, filename: str):
+    user = get_user_data(update.effective_user.id)
     file_path = DATA_DIR / filename
     if not file_path.exists():
         await update.callback_query.edit_message_text("File expired.")
@@ -270,7 +282,7 @@ async def handle_split_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif action == "zip_parts":
         await zip_and_send_parts(update, context, file_path, title)
 
-# --- Direct URL Handler ---
+# --- Direct URL ---
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     if "youtube.com" in url or "youtu.be" in url:
         await ask_youtube_quality(update, context, url)
@@ -278,7 +290,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: st
 
     is_valid, ext, _ = is_direct_file_url(url)
     if not is_valid:
-        await update.effective_message.reply_text("Unsupported URL.")
+        await update.effective_message.reply_text("Invalid URL.")
         return
 
     msg = await update.effective_message.reply_text("Checking...")
@@ -311,7 +323,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: st
                 f"File is {format_size(file_size)} (>50MB)\nChoose:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
-            context.user_data["temp"]["pending_file"] = str(file_path)
+            user = get_user_data(update.effective_user.id)
+            user["temp"]["pending_file"] = str(file_path)
+            save_user_data(update.effective_user.id, user)
         else:
             await upload_as_document(update, context, file_path, caption, file_path.name)
     except Exception as e:
@@ -328,7 +342,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
         keyboard.append([InlineKeyboardButton("Broadcast", callback_data="admin_broadcast")])
     await update.effective_message.reply_text(
-        "Welcome! Choose a tool:",
+        "Welcome! Choose:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -355,17 +369,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_split_choice(update, context, action.split("_")[0], filename)
     elif data == "cancel":
         await q.edit_message_text("Cancelled.")
-    # ... (other menus: cloud, inspector, rules, admin)
 
 # --- Message Handler ---
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip() if update.message.text else ""
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
     if text.startswith(("http://", "https://")):
         await handle_url(update, context, text)
 
 # --- Start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
+
+# --- Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Error: {context.error}")
 
 # --- Main ---
 async def main():
@@ -376,11 +395,19 @@ async def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.COMMAND, start))  # Only /start
+    app.add_handler(MessageHandler(filters.COMMAND, start))
+    app.add_error_handler(error_handler)
+
+    # Prevent multiple instances
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+    except Conflict:
+        logger.warning("Another instance is running. Stopping.")
+        return
 
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(drop_pending_updates=True)
     logger.info("Bot is running...")
     await asyncio.Event().wait()
 
