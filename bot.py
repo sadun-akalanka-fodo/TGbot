@@ -3,12 +3,11 @@ import asyncio
 import os
 import re
 import logging
+import zipfile
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
-import zipfile
-import subprocess
-import shutil
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
@@ -41,7 +40,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 if not BOT_TOKEN or ADMIN_ID == 0:
-    raise ValueError("Set BOT_TOKEN & ADMIN_ID!")
+    raise ValueError("BOT_TOKEN and ADMIN_ID required in .env!")
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -126,24 +125,29 @@ async def upload_as_document(update: Update, context: ContextTypes.DEFAULT_TYPE,
             try: os.remove(file_path)
             except: pass
 
-# --- Split Video into Parts ---
+# --- Split Video (FFmpeg) ---
 async def split_and_send_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, title: str):
-    msg = await update.effective_message.reply_text("Splitting...")
+    msg = await update.effective_message.reply_text("Splitting video...")
     part_dir = DATA_DIR / f"parts_{update.effective_user.id}_{int(datetime.now().timestamp())}"
     part_dir.mkdir(exist_ok=True)
 
     try:
+        import subprocess
         cmd = [
             'ffmpeg', '-i', str(file_path),
             '-f', 'segment', '-segment_time', '180',
             '-c', 'copy', '-reset_timestamps', '1',
             str(part_dir / "part_%03d.mp4")
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            await msg.edit_text(f"FFmpeg error: {result.stderr[:500]}")
+            return
+
         parts = sorted(part_dir.glob("part_*.mp4"))
         for i, p in enumerate(parts):
             await upload_as_document(update, context, p, f"{title} [Part {i+1}/{len(parts)}]", p.name)
-        await msg.edit_text(f"Sent {len(parts)} parts.")
+        await msg.edit_text(f"Sent {len(parts)} video parts.")
     except Exception as e:
         await msg.edit_text(f"Split failed: {e}")
     finally:
@@ -152,12 +156,12 @@ async def split_and_send_video(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # --- Zip into Parts ---
 async def zip_and_send_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, title: str):
-    msg = await update.effective_message.reply_text("Zipping...")
+    msg = await update.effective_message.reply_text("Zipping into parts...")
     zip_dir = DATA_DIR / f"zip_{update.effective_user.id}_{int(datetime.now().timestamp())}"
     zip_dir.mkdir(exist_ok=True)
 
     try:
-        max_part_size = 45 * 1024 * 1024
+        max_part_size = 45 * 1024 * 1024  # 45 MB
         part_num = 1
         current_zip_path = zip_dir / f"{title}_part{part_num}.zip"
         current_zip = zipfile.ZipFile(current_zip_path, 'w', zipfile.ZIP_DEFLATED)
@@ -165,8 +169,9 @@ async def zip_and_send_parts(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         with open(file_path, "rb") as f:
             while True:
-                chunk = f.read(1024*1024)
-                if not chunk: break
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
                 if current_size + len(chunk) > max_part_size:
                     current_zip.close()
                     await upload_as_document(update, context, current_zip_path, f"{title} [Part {part_num}]", current_zip_path.name)
@@ -176,8 +181,9 @@ async def zip_and_send_parts(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     current_size = 0
                 current_zip.writestr(file_path.name, chunk)
                 current_size += len(chunk)
-        current_zip.close()
-        await upload_as_document(update, context, current_zip_path, f"{title} [Part {part_num}]", current_zip_path.name)
+        if current_size > 0:
+            current_zip.close()
+            await upload_as_document(update, context, current_zip_path, f"{title} [Part {part_num}]", current_zip_path.name)
         await msg.edit_text(f"Sent {part_num} zip parts.")
     except Exception as e:
         await msg.edit_text(f"Zip failed: {e}")
@@ -185,7 +191,7 @@ async def zip_and_send_parts(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if zip_dir.exists():
             shutil.rmtree(zip_dir)
 
-# --- YouTube Quality ---
+# --- YouTube Quality Menu ---
 async def ask_youtube_quality(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     user = get_user_data(update.effective_user.id)
     user["temp"]["yt_url"] = url
@@ -199,11 +205,11 @@ async def ask_youtube_quality(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("Cancel", callback_data="cancel")]
     ]
     await update.effective_message.reply_text(
-        "Choose quality:",
+        "Choose download quality:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# --- Handle YouTube Download ---
+# --- YouTube Download ---
 async def handle_youtube_download(update: Update, context: ContextTypes.DEFAULT_TYPE, quality: str):
     user = get_user_data(update.effective_user.id)
     url = user["temp"].get("yt_url")
@@ -211,7 +217,7 @@ async def handle_youtube_download(update: Update, context: ContextTypes.DEFAULT_
         await update.callback_query.edit_message_text("URL expired.")
         return
 
-    msg = await update.callback_query.edit_message_text("Fetching...")
+    msg = await update.callback_query.edit_message_text("Fetching info...")
     cookies_path = "cookies.txt"
     ydl_opts = {'noplaylist': True, 'quiet': True, 'no_warnings': True}
     if os.path.exists(cookies_path):
@@ -257,7 +263,7 @@ async def handle_youtube_download(update: Update, context: ContextTypes.DEFAULT_
                     [InlineKeyboardButton("Cancel", callback_data="cancel")]
                 ]
                 await msg.edit_text(
-                    f"File is {format_size(file_size)} (>50MB)\nChoose:",
+                    f"File is {format_size(file_size)} (>50MB)\nChoose how to send:",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
                 user["temp"]["pending_file"] = str(temp_path)
@@ -268,9 +274,8 @@ async def handle_youtube_download(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         await msg.edit_text(f"Error: {e}")
 
-# --- Handle Split/Zip ---
+# --- Handle Split/Zip Choice ---
 async def handle_split_choice(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, filename: str):
-    user = get_user_data(update.effective_user.id)
     file_path = DATA_DIR / filename
     if not file_path.exists():
         await update.callback_query.edit_message_text("File expired.")
@@ -282,7 +287,7 @@ async def handle_split_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif action == "zip_parts":
         await zip_and_send_parts(update, context, file_path, title)
 
-# --- Direct URL ---
+# --- Direct URL Download ---
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     if "youtube.com" in url or "youtu.be" in url:
         await ask_youtube_quality(update, context, url)
@@ -290,10 +295,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: st
 
     is_valid, ext, _ = is_direct_file_url(url)
     if not is_valid:
-        await update.effective_message.reply_text("Invalid URL.")
+        await update.effective_message.reply_text("Unsupported URL.")
         return
 
-    msg = await update.effective_message.reply_text("Checking...")
+    msg = await update.effective_message.reply_text("Checking size...")
     try:
         async with context.application.bot_data["session"].head(url) as resp:
             size = int(resp.headers.get("content-length", 0))
@@ -342,7 +347,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
         keyboard.append([InlineKeyboardButton("Broadcast", callback_data="admin_broadcast")])
     await update.effective_message.reply_text(
-        "Welcome! Choose:",
+        "Welcome! Choose a feature:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -360,8 +365,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     data = q.data
 
-    if data == "main": await main_menu(update, context)
-    elif data == "downloader": await downloader_menu(update, context)
+    if data == "main":
+        await main_menu(update, context)
+    elif data == "downloader":
+        await downloader_menu(update, context)
     elif data.startswith("yt_"):
         await handle_youtube_download(update, context, data.split("_")[1])
     elif data.startswith("split_video|") or data.startswith("zip_parts|"):
@@ -398,11 +405,10 @@ async def main():
     app.add_handler(MessageHandler(filters.COMMAND, start))
     app.add_error_handler(error_handler)
 
-    # Prevent multiple instances
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
     except Conflict:
-        logger.warning("Another instance is running. Stopping.")
+        logger.warning("Another instance running. Exiting.")
         return
 
     await app.initialize()
