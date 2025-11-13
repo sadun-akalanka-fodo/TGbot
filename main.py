@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB in bytes
-PART_SIZE = 30 * 1024 * 1024  # 49 MB per part
+PART_SIZE = 49.99 * 1024 * 1024  # 49 MB per part
 TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB (Telegram limit)
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
