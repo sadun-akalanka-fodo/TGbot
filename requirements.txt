@@ -5,3 +5,4 @@ mutagen
 tinydb
 aiohttp
 python-dotenv
+yt-dlp
