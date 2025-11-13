@@ -20,7 +20,7 @@ from telegram.constants import ParseMode
 from PIL import Image
 from PIL.ExifTags import TAGS
 from hachoir.parser import createParser
-from hachoir.metadata import extractMetadata
+from hachoir-metadata import extractMetadata
 from mutagen import File as MutagenFile
 
 # --- TinyDB ---
@@ -28,7 +28,10 @@ from tinydb import TinyDB, Query
 from tinydb.storages import JSONStorage
 from tinydb.middlewares import CachingMiddleware
 
-# --- .env (local only) ---
+# --- yt-dlp (LEARNING ONLY) ---
+import yt_dlp
+
+# --- .env (local) ---
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -41,9 +44,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is required in environment variables!")
+    raise ValueError("BOT_TOKEN is required!")
 if ADMIN_ID == 0:
-    raise ValueError("ADMIN_ID is required in environment variables!")
+    raise ValueError("ADMIN_ID is required!")
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -114,23 +117,74 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, reply_markup=reply_markup)
 
-# --- Downloader ---
+# --- Downloader Menu ---
 async def downloader_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("Back", callback_data="main")]]
+    text = (
+        "*Downloader (Learning Mode)*\n\n"
+        "Send:\n"
+        "• Direct file link (.mp4, .pdf, etc.)\n"
+        "• YouTube link (educational only)\n\n"
+        "Warning: YouTube = ToS risk"
+    )
     await update.callback_query.edit_message_text(
-        "Send a **direct file URL** (ends in .mp4, .pdf, .jpg, etc.)\n\n"
-        "No YouTube, TikTok, or shortened links.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
+        text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
     )
     context.user_data["state"] = "awaiting_url"
 
+# --- YouTube Handler (LEARNING) ---
+async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    msg = await update.message.reply_text("Fetching video info...")
+
+    ydl_opts = {
+        'format': 'best[height<=720]',
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            filesize = info.get('filesize_approx', 0)
+
+            if filesize and filesize > MAX_FILE_SIZE:
+                await msg.edit_text(f"Too big: {format_size(filesize)}")
+                return
+
+            await msg.edit_text(f"Downloading: {title}")
+
+            temp_path = DATA_DIR / f"yt_{update.effective_user.id}_{int(datetime.now().timestamp())}.mp4"
+            ydl_opts['outtmpl'] = str(temp_path)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            await msg.edit_text("Uploading...")
+            with open(temp_path, "rb") as f:
+                await update.message.reply_video(f, caption=f"{title}\nFrom: {url}", duration=duration)
+            os.remove(temp_path)
+            await msg.delete()
+
+    except Exception as e:
+        await msg.edit_text(f"Error: {str(e)}")
+
+# --- Direct URL Handler ---
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("state") != "awaiting_url": return
     url = update.message.text.strip()
+
+    # --- YOUTUBE ---
+    if "youtube.com" in url or "youtu.be" in url:
+        await handle_youtube(update, context, url)
+        context.user_data["state"] = None
+        return
+
+    # --- DIRECT FILE ---
     is_valid, ext, category = is_direct_file_url(url)
     if not is_valid:
-        await update.message.reply_text("Invalid URL. Must end with a file extension.")
+        await update.message.reply_text("Invalid URL. Must be direct file or YouTube link.")
         return
 
     msg = await update.message.reply_text("Checking size...")
@@ -157,7 +211,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(file_path, "wb") as f:
                 async for chunk in resp.content.iter_chunked(1024*1024):
                     f.write(chunk)
-        await msg.edit_text("Uploading to Telegram...")
+        await msg.edit_text("Uploading...")
         with open(file_path, "rb") as f:
             if category == "video":
                 await update.message.reply_video(f, caption="Downloaded from URL")
@@ -174,7 +228,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         context.user_data["state"] = None
 
-# --- Cloud Storage ---
+# --- Cloud Storage (same as before) ---
 async def cloud_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Save File", callback_data="cloud_save")],
