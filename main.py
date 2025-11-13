@@ -265,9 +265,7 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
         or update.message.video
         or update.message.audio
         or update.message.voice
-        or update.message.photo[-1]
-        if update.message.photo
-        else None
+        or (update.message.photo[-1] if update.message.photo else None)
     )
 
     if not file_obj:
@@ -1324,10 +1322,17 @@ def main():
     # Callbacks for inline buttons
     app.add_handler(CallbackQueryHandler(handle_reposter_filter_callback, pattern=r"^repf_"))
 
-    # Files (cloud upload)
+    # Files (cloud upload) – FIXED FILTERS HERE
+    file_filters = (
+        filters.Document.ALL
+        | filters.VIDEO
+        | filters.AUDIO
+        | filters.VOICE
+        | filters.PHOTO
+    )
     app.add_handler(
         MessageHandler(
-            filters.Document | filters.Video | filters.Audio | filters.Voice | filters.PHOTO,
+            file_filters,
             handle_incoming_file,
         )
     )
