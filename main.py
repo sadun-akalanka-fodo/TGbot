@@ -28,7 +28,6 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    InputFile,   # ✅ ADDED
 )
 from telegram.ext import (
     Application,
@@ -75,6 +74,9 @@ SUPPORTED_PLATFORMS = [
 
 # user_id -> session data
 user_sessions: Dict[int, Dict[str, Any]] = {}
+
+# Admin (optional) – only admin can update cookies
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 # ------------- Load cookies from env (optional) -------------
 
@@ -422,7 +424,7 @@ async def download_video(
                 "❌ I can't download this video.\n\n"
                 "YouTube is asking to *sign in to confirm you're not a bot*.\n"
                 "This usually happens for protected / limited videos or when the server IP looks like a bot.\n\n"
-                "👉 Try a different video, or configure cookies (YTDLP_COOKIES)."
+                "👉 Try a different video, or update cookies."
             )
         else:
             text = f"❌ Download failed:\n{msg}\n\nTry another link."
@@ -729,19 +731,9 @@ async def send_file(
         caption = f"✅ Download complete!\n📦 Size: {format_file_size(file_size)}"
         with open(file_path, "rb") as f:
             if file_path.suffix.lower() == ".mp3":
-                # ✅ build filename from REAL title (display_name) if available
-                if display_name:
-                    base = re.sub(r"[^\w\s-]", "", display_name).strip()
-                    base = re.sub(r"[-\s]+", "_", base)[:60] or file_path.stem
-                    filename = base + file_path.suffix
-                else:
-                    filename = file_path.name
-
-                audio_input = InputFile(f, filename=filename)
-
                 await context.bot.send_audio(
                     chat_id=update.effective_chat.id,
-                    audio=audio_input,
+                    audio=f,
                     caption=caption,
                     title=display_name,
                 )
@@ -927,6 +919,40 @@ async def download_music_by_search(
         await waiting_msg.edit_text(f"❌ Error downloading music:\n{e}")
 
 
+# ------------- Cookies upload handler (NEW) -------------
+
+async def handle_cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Allow the bot admin to upload a new cookies.txt file directly via Telegram.
+    Only runs for a document named exactly 'cookies.txt'.
+    """
+    if not update.message or not update.message.document or not update.effective_user:
+        return
+
+    doc = update.message.document
+    user_id = update.effective_user.id
+
+    # Only react to a file literally named 'cookies.txt'
+    if doc.file_name != "cookies.txt":
+        return
+
+    # If ADMIN_ID set, only admin can update cookies
+    if ADMIN_ID != 0 and user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Only the bot admin can update cookies.")
+        return
+
+    try:
+        file = await doc.get_file()
+        await file.download_to_drive("cookies.txt")
+        await update.message.reply_text(
+            "✅ cookies.txt updated.\n"
+            "New YouTube downloads and music searches will use these cookies."
+        )
+        logger.info("cookies.txt updated via Telegram by user %s", user_id)
+    except Exception as e:
+        logger.error(f"Failed to save cookies.txt from Telegram: {e}")
+        await update.message.reply_text(f"❌ Failed to save cookies.txt: {e}")
+
 
 # ------------- Help -------------
 
@@ -978,6 +1004,9 @@ def main() -> None:
     # OCR handlers
     app.add_handler(MessageHandler(filters.PHOTO, handle_image_ocr))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_ocr))
+
+    # 🔐 Cookies upload (non-PDF documents, e.g. cookies.txt)
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_cookies_document))
 
     # Video files for conversion
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_file))
