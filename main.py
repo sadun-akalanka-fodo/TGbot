@@ -28,6 +28,7 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    InputFile,   # ✅ ADDED
 )
 from telegram.ext import (
     Application,
@@ -728,9 +729,19 @@ async def send_file(
         caption = f"✅ Download complete!\n📦 Size: {format_file_size(file_size)}"
         with open(file_path, "rb") as f:
             if file_path.suffix.lower() == ".mp3":
+                # ✅ build filename from REAL title (display_name) if available
+                if display_name:
+                    base = re.sub(r"[^\w\s-]", "", display_name).strip()
+                    base = re.sub(r"[-\s]+", "_", base)[:60] or file_path.stem
+                    filename = base + file_path.suffix
+                else:
+                    filename = file_path.name
+
+                audio_input = InputFile(f, filename=filename)
+
                 await context.bot.send_audio(
                     chat_id=update.effective_chat.id,
-                    audio=f,
+                    audio=audio_input,
                     caption=caption,
                     title=display_name,
                 )
