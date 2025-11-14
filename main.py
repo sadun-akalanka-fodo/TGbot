@@ -849,20 +849,30 @@ async def download_music_by_search(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query_text, download=True)
 
-        # ---- YouTube title ----
+        # ---- YouTube title (REAL title from video) ----
         yt_title = None
         if isinstance(info, dict):
+            # Sometimes yt-dlp puts the chosen format under requested_downloads
             if "requested_downloads" in info and info["requested_downloads"]:
-                yt_title = info["requested_downloads"][0].get("title")
+                rd = info["requested_downloads"][0]
+                yt_title = rd.get("title")
+                # some versions store full info dict nested
+                if not yt_title and "info_dict" in rd:
+                    yt_title = rd["info_dict"].get("title")
+
+            # Fallback to main info title if still None
             if not yt_title:
                 yt_title = info.get("title")
-        if not yt_title:
-            yt_title = query_text
 
+        # Final fallback if YouTube didn't provide any title at all
+        if not yt_title:
+            yt_title = "Unknown Title"
+
+        # Use the REAL YouTube title for the filename
         base_from_title = re.sub(r"[^\w\s-]", "", yt_title).strip()
         base_from_title = re.sub(r"[-\s]+", "_", base_from_title)[:60] or safe_query
 
-        # ---- find actual file ----
+        # ---- find actual file on disk ----
         candidate: Optional[Path] = None
         if isinstance(info, dict):
             if "requested_downloads" in info and info["requested_downloads"]:
@@ -886,7 +896,7 @@ async def download_music_by_search(
             await waiting_msg.edit_text("❌ Failed to download song. Try another name?")
             return
 
-        # rename to nice title
+        # 🔁 Rename file to match the REAL YT title
         nice_path = candidate.with_name(base_from_title + candidate.suffix)
         try:
             candidate.rename(nice_path)
@@ -897,12 +907,14 @@ async def download_music_by_search(
         size = candidate.stat().st_size
         await waiting_msg.edit_text("✅ Found and downloaded! Uploading to Telegram...")
 
+        # Send with YouTube title as audio title in Telegram player
         await send_file(update, context, candidate, size, display_name=yt_title)
         cleanup_file(candidate)
 
     except Exception as e:
         logger.error(f"Music download error: {e}")
         await waiting_msg.edit_text(f"❌ Error downloading music:\n{e}")
+
 
 
 # ------------- Help -------------
