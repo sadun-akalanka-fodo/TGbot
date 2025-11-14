@@ -21,7 +21,7 @@ import subprocess
 import zipfile
 from typing import Dict, Any, Optional
 from pathlib import Path
-import asyncio  # for running blocking work in threads
+from datetime import datetime  # ✅ added
 
 from telegram import (
     Update,
@@ -76,11 +76,40 @@ SUPPORTED_PLATFORMS = [
 # user_id -> session data
 user_sessions: Dict[int, Dict[str, Any]] = {}
 
-# Admin (optional) – only admin can update cookies
+# Admin (optional) – only admin can update cookies / see logs
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+# ------------- Simple Action Log -------------
+
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+ACTION_LOG = LOG_DIR / "actions.log"
+
+
+def log_action(user, action: str, details: str = "") -> None:
+    """Append a simple, human-readable log line: time, user, action, details."""
+    try:
+        user_id = getattr(user, "id", None) or "unknown"
+        username = getattr(user, "username", None)
+        full_name = (
+            f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+            if user is not None else ""
+        )
+        name = username or full_name or "unknown"
+
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"{ts}\tuser_id={user_id}\tuser={name}\taction={action}\tdetails={details}\n"
+
+        with open(ACTION_LOG, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        logger.error(f"Failed to write action log: {e}")
+
 
 # ------------- Load cookies from env (optional) -------------
 
+# If you set YTDLP_COOKIES in Railway env vars with the content of cookies.txt,
+# this will create a cookies.txt file on startup.
 COOKIES_ENV = os.getenv("YTDLP_COOKIES")
 if COOKIES_ENV:
     try:
@@ -151,6 +180,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
 
+    user = update.effective_user
+    log_action(user, "command_start")
+
     text = (
         "👋 Welcome to Media Butler!\n\n"
         "Choose what you want to do:\n\n"
@@ -168,11 +200,13 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message or not update.effective_user:
         return
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
     text = update.message.text
 
     if text == "📹 Download Video":
         user_sessions[user_id] = {"mode": "download"}
+        log_action(user, "set_mode", "download_video")
         await update.message.reply_text(
             "📹 *Video Download Mode*\n\n"
             "Send me a video link from:\n"
@@ -184,6 +218,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif text == "🎵 Convert Video to MP3":
         user_sessions[user_id] = {"mode": "convert"}
+        log_action(user, "set_mode", "convert_video_to_mp3")
         await update.message.reply_text(
             "🎵 *Video → MP3 Converter*\n\n"
             "Now send me a *video file* and I will convert it to MP3.",
@@ -192,6 +227,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif text == "📄 PDF to Text (OCR)":
         user_sessions[user_id] = {"mode": "pdf_ocr"}
+        log_action(user, "set_mode", "pdf_ocr")
         await update.message.reply_text(
             "📄 *PDF OCR Mode*\n\n"
             "Send me a PDF file and I’ll extract the text (English + Sinhala).",
@@ -200,6 +236,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif text == "🖼️ Image Text (OCR)":
         user_sessions[user_id] = {"mode": "img_ocr"}
+        log_action(user, "set_mode", "image_ocr")
         await update.message.reply_text(
             "🖼️ *Image OCR Mode*\n\n"
             "Send me an image that contains English and/or Sinhala text.",
@@ -208,6 +245,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif text == "🎧 Download Music (Search)":
         user_sessions[user_id] = {"mode": "music"}
+        log_action(user, "set_mode", "music_search")
         await update.message.reply_text(
             "🎧 *Music Download Mode*\n\n"
             "Send me a song name, artist name, or both.\n"
@@ -228,7 +266,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message or not update.effective_user:
         return
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
     message_text = update.message.text
 
     session = user_sessions.get(user_id, {})
@@ -236,16 +275,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Music search mode
     if mode == "music":
+        log_action(user, "music_query", message_text)
         waiting_msg = await update.message.reply_text("🎧 Searching YouTube for your song...")
         await download_music_by_search(update, context, user_id, message_text, waiting_msg)
         return
 
     # Video download mode
     if mode == "download":
+        log_action(user, "video_url_received", message_text)
         await handle_video_url(update, context)
         return
 
     # If no mode or other mode
+    log_action(user, "text_without_mode", message_text)
     await update.message.reply_text(
         "Please pick what you want to do from the menu 👇",
         reply_markup=get_main_menu_keyboard(),
@@ -259,7 +301,8 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message or not update.effective_user:
         return
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
     message_text = update.message.text
 
     if not is_video_url(message_text):
@@ -273,6 +316,7 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     video_info = get_video_info(message_text)
     if not video_info:
+        log_action(user, "video_info_failed", message_text)
         await processing_msg.edit_text(
             "❌ I couldn't process this link.\n"
             "Make sure the video is public and the URL is correct.\n\n"
@@ -280,11 +324,14 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    title = video_info.get("title", "Unknown")
+    log_action(user, "video_info_ok", f"url={message_text} title={title}")
+
     user_sessions[user_id] = {
         "mode": "download",
         "url": message_text,
         "video_info": video_info,
-        "title": video_info.get("title", "Unknown"),
+        "title": title,
     }
 
     keyboard = [
@@ -300,13 +347,12 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    title = video_info.get("title", "Unknown")[:100]
     dur = video_info.get("duration", 0)
     dur_str = f"{dur // 60}:{dur % 60:02d}" if dur else "Unknown"
 
     await processing_msg.edit_text(
         f"✅ Video found!\n\n"
-        f"📝 Title: {title}\n"
+        f"📝 Title: {title[:100]}\n"
         f"⏱️ Duration: {dur_str}\n\n"
         f"Choose quality:",
         reply_markup=reply_markup,
@@ -319,7 +365,8 @@ async def handle_quality_selection(update: Update, context: ContextTypes.DEFAULT
         return
 
     await query.answer()
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
 
     if user_id not in user_sessions:
         await query.edit_message_text("❌ Session expired. Send the link again.")
@@ -338,6 +385,8 @@ async def handle_quality_selection(update: Update, context: ContextTypes.DEFAULT
     }
     quality_text = text_map.get(quality_choice, quality_choice)
 
+    log_action(user, "quality_selected", quality_choice)
+
     await query.edit_message_text(
         f"⬇️ Downloading in {quality_text}...\n\nThis may take a few moments."
     )
@@ -354,6 +403,8 @@ async def download_video(
     url = session["url"]
     quality = session["quality"]
     video_title = session["title"]
+
+    user = update.effective_user
 
     safe_filename = re.sub(r"[^\w\s-]", "", video_title).strip()
     safe_filename = re.sub(r"[-\s]+", "_", safe_filename)[:50] or f"user_{user_id}_video"
@@ -387,17 +438,14 @@ async def download_video(
             "noplaylist": True,
         }
 
+    # Attach cookies if cookies.txt exists
     cookies_path = "cookies.txt"
     if os.path.exists(cookies_path):
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        # run yt-dlp in background thread
-        def _do_download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-
-        await asyncio.to_thread(_do_download)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
         if quality == "audio":
             files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp3"))
@@ -405,11 +453,17 @@ async def download_video(
             files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp4"))
 
         if not files:
+            log_action(user, "video_download_failed", "no_files_after_download")
             await update.callback_query.edit_message_text("❌ Download failed. Try again.")
             return
 
         downloaded_file = files[0]
         size = downloaded_file.stat().st_size
+        log_action(
+            user,
+            "video_download_success",
+            f"quality={quality} size={size} file={downloaded_file.name}",
+        )
 
         if size > MAX_FILE_SIZE:
             await handle_large_file(update, context, user_id, downloaded_file, size)
@@ -421,6 +475,7 @@ async def download_video(
     except Exception as e:
         logger.error(f"Download error: {e}")
         msg = str(e)
+        log_action(user, "video_download_error", msg)
         if "Sign in to confirm you’re not a bot" in msg or "Sign in to confirm you're not a bot" in msg:
             text = (
                 "❌ I can't download this video.\n\n"
@@ -442,6 +497,13 @@ async def handle_large_file(
     file_path: Path,
     file_size: int,
 ) -> None:
+    user = update.effective_user
+    log_action(
+        user,
+        "large_file_detected",
+        f"size={file_size} file={file_path.name}",
+    )
+
     session = user_sessions.get(user_id, {})
     session["large_file_path"] = str(file_path)
     session["large_file_size"] = file_size
@@ -475,7 +537,8 @@ async def handle_split_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await query.answer()
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
 
     if user_id not in user_sessions or "large_file_path" not in user_sessions[user_id]:
         await query.edit_message_text("❌ Session expired. Send the link again.")
@@ -485,6 +548,8 @@ async def handle_split_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_path = Path(session["large_file_path"])
     file_size = session["large_file_size"]
     split_type = query.data
+
+    log_action(user, "split_choice", f"type={split_type} file={file_path.name}")
 
     await query.edit_message_text("⚙️ Preparing file, please wait...")
 
@@ -513,7 +578,7 @@ async def split_video_parts(
             "default=noprint_wrappers=1:nokey=1",
             str(file_path),
         ]
-        result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
         total_duration = float(result.stdout.strip() or "0")
 
         current_time = 0.0
@@ -536,7 +601,7 @@ async def split_video_parts(
                 "1",
                 str(out_file),
             ]
-            await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+            subprocess.run(cmd, capture_output=True, text=True)
 
             if out_file.exists() and out_file.stat().st_size > 0:
                 parts.append(out_file)
@@ -551,7 +616,7 @@ async def split_video_parts(
                     "default=noprint_wrappers=1:nokey=1",
                     str(out_file),
                 ]
-                res_dur = await asyncio.to_thread(subprocess.run, cmd_dur, capture_output=True, text=True)
+                res_dur = subprocess.run(cmd_dur, capture_output=True, text=True)
                 try:
                     part_dur = float(res_dur.stdout.strip() or "0")
                     current_time += part_dur
@@ -580,7 +645,7 @@ async def split_video_parts(
                     "default=noprint_wrappers=1:nokey=1",
                     str(p),
                 ]
-                meta_res = await asyncio.to_thread(subprocess.run, cmd_meta, capture_output=True, text=True)
+                meta_res = subprocess.run(cmd_meta, capture_output=True, text=True)
                 if meta_res.returncode == 0:
                     lines = [ln.strip() for ln in meta_res.stdout.splitlines() if ln.strip()]
                     if len(lines) >= 2:
@@ -725,6 +790,7 @@ async def send_file(
     if not update.effective_chat:
         return
 
+    user = update.effective_user
     try:
         caption = f"✅ Download complete!\n📦 Size: {format_file_size(file_size)}"
         with open(file_path, "rb") as f:
@@ -742,8 +808,10 @@ async def send_file(
                     caption=caption,
                     supports_streaming=True,
                 )
+        log_action(user, "file_sent", f"{file_path.name} size={file_size}")
     except Exception as e:
         logger.error(f"Error sending file: {e}")
+        log_action(user, "file_send_error", str(e))
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"❌ Error sending file: {e}",
@@ -765,7 +833,8 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message or not update.message.video or not update.effective_user:
         return
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
     session = user_sessions.get(user_id, {})
     if session.get("mode") != "convert":
         await update.message.reply_text(
@@ -774,6 +843,8 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             reply_markup=get_main_menu_keyboard(),
         )
         return
+
+    log_action(user, "video_file_received_for_convert")
 
     processing_msg = await update.message.reply_text("⏳ Downloading your video...")
 
@@ -796,18 +867,21 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "192k",
             str(out_path),
         ]
-        await asyncio.to_thread(subprocess.run, cmd, capture_output=True, check=True)
+        subprocess.run(cmd, capture_output=True, check=True)
 
         if out_path.exists():
             size = out_path.stat().st_size
+            log_action(user, "video_to_mp3_success", f"size={size}")
             await send_file(update, context, out_path, size)
             await processing_msg.delete()
             cleanup_file(in_path)
             cleanup_file(out_path)
         else:
+            log_action(user, "video_to_mp3_failed", "no_output_file")
             await processing_msg.edit_text("❌ Conversion failed. Please try again.")
     except Exception as e:
         logger.error(f"Video → audio error: {e}")
+        log_action(user, "video_to_mp3_error", str(e))
         await processing_msg.edit_text(f"❌ Error: {e}")
 
 
@@ -821,6 +895,7 @@ async def download_music_by_search(
     waiting_msg,
 ) -> None:
     """Search YouTube for a song and download best audio as MP3."""
+    user = update.effective_user
     safe_query = re.sub(r"[^\w\s-]", "", query_text).strip()
     safe_query = re.sub(r"[-\s]+", "_", safe_query)[:50] or f"user_{user_id}_song"
 
@@ -847,11 +922,8 @@ async def download_music_by_search(
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        def _do_music():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(query_text, download=True)
-
-        info = await asyncio.to_thread(_do_music)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query_text, download=True)
 
         yt_title = None
         if isinstance(info, dict):
@@ -860,12 +932,13 @@ async def download_music_by_search(
                 yt_title = rd.get("title")
                 if not yt_title and "info_dict" in rd:
                     yt_title = rd["info_dict"].get("title")
-
             if not yt_title:
                 yt_title = info.get("title")
 
         if not yt_title:
             yt_title = "Unknown Title"
+
+        log_action(user, "music_download_info_ok", f"query={query_text} title={yt_title}")
 
         base_from_title = re.sub(r"[^\w\s-]", "", yt_title).strip()
         base_from_title = re.sub(r"[-\s]+", "_", base_from_title)[:60] or safe_query
@@ -890,6 +963,7 @@ async def download_music_by_search(
                 query_text,
                 [p.name for p in DOWNLOAD_DIR.glob('*')],
             )
+            log_action(user, "music_download_file_missing", query_text)
             await waiting_msg.edit_text("❌ Failed to download song. Try another name?")
             return
 
@@ -901,6 +975,7 @@ async def download_music_by_search(
             logger.warning(f"Rename failed: {e}")
 
         size = candidate.stat().st_size
+        log_action(user, "music_download_success", f"title={yt_title} size={size}")
         await waiting_msg.edit_text("✅ Found and downloaded! Uploading to Telegram...")
 
         await send_file(update, context, candidate, size, display_name=yt_title)
@@ -908,6 +983,7 @@ async def download_music_by_search(
 
     except Exception as e:
         logger.error(f"Music download error: {e}")
+        log_action(user, "music_download_error", str(e))
         await waiting_msg.edit_text(f"❌ Error downloading music:\n{e}")
 
 
@@ -922,13 +998,15 @@ async def handle_cookies_document(update: Update, context: ContextTypes.DEFAULT_
         return
 
     doc = update.message.document
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
 
     if doc.file_name != "cookies.txt":
         return
 
     if ADMIN_ID != 0 and user_id != ADMIN_ID:
         await update.message.reply_text("❌ Only the bot admin can update cookies.")
+        log_action(user, "cookies_update_denied", "not_admin")
         return
 
     try:
@@ -938,10 +1016,50 @@ async def handle_cookies_document(update: Update, context: ContextTypes.DEFAULT_
             "✅ cookies.txt updated.\n"
             "New YouTube downloads and music searches will use these cookies."
         )
+        log_action(user, "cookies_updated", "via_telegram_document")
         logger.info("cookies.txt updated via Telegram by user %s", user_id)
     except Exception as e:
         logger.error(f"Failed to save cookies.txt from Telegram: {e}")
+        log_action(user, "cookies_update_error", str(e))
         await update.message.reply_text(f"❌ Failed to save cookies.txt: {e}")
+
+
+# ------------- /log command (show recent actions) -------------
+
+async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Show last ~30 log lines.
+    If ADMIN_ID is set, only admin can see full log.
+    """
+    if not update.message or not update.effective_user:
+        return
+
+    user = update.effective_user
+
+    if ADMIN_ID != 0 and user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only the bot admin can view logs.")
+        log_action(user, "log_view_denied")
+        return
+
+    if not ACTION_LOG.exists():
+        await update.message.reply_text("📂 No log entries yet.")
+        log_action(user, "log_view_empty")
+        return
+
+    try:
+        with open(ACTION_LOG, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        last_lines = lines[-30:]
+        text = "📜 *Recent actions (last 30 lines):*\n\n" + "".join(last_lines)
+
+        # send as plain text to avoid escaping issues
+        await update.message.reply_text(text)
+        log_action(user, "log_view_ok", f"lines={len(last_lines)}")
+    except Exception as e:
+        logger.error(f"Error reading logs: {e}")
+        log_action(user, "log_view_error", str(e))
+        await update.message.reply_text(f"❌ Error reading logs: {e}")
 
 
 # ------------- Help -------------
@@ -949,6 +1067,9 @@ async def handle_cookies_document(update: Update, context: ContextTypes.DEFAULT_
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
+
+    user = update.effective_user
+    log_action(user, "command_help")
 
     text = (
         "📚 *How to use this bot*\n\n"
@@ -975,18 +1096,12 @@ def main() -> None:
         print("Set TELEGRAM_BOT_TOKEN env var and restart.")
         return
 
-    # 🔥 Enable concurrent update handling
-    app = (
-        Application
-        .builder()
-        .token(token)
-        .concurrent_updates(True)   # <-- key line for parallel handling
-        .build()
-    )
+    app = Application.builder().token(token).build()
 
-    # /start + /help
+    # /start + /help + /log
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("log", log_command))
 
     # Menu buttons
     app.add_handler(
@@ -1002,7 +1117,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_image_ocr))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_ocr))
 
-    # Cookies upload
+    # 🔐 Cookies upload (non-PDF documents, e.g. cookies.txt)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_cookies_document))
 
     # Video files for conversion
