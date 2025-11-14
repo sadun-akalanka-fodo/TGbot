@@ -358,9 +358,11 @@ async def download_video(
 
     safe_filename = re.sub(r"[^\w\s-]", "", video_title).strip()
     safe_filename = re.sub(r"[-\s]+", "_", safe_filename)[:50] or f"user_{user_id}_video"
+    # ✅ Option B: include user ID in base name to avoid cross-user collisions
+    base_name = f"{safe_filename}_user{user_id}"
 
     if quality == "audio":
-        output_path = DOWNLOAD_DIR / f"{safe_filename}.mp3"
+        output_path = DOWNLOAD_DIR / f"{base_name}.mp3"
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": str(output_path),
@@ -376,7 +378,7 @@ async def download_video(
             "noplaylist": True,
         }
     else:
-        output_path = DOWNLOAD_DIR / f"{safe_filename}.mp4"
+        output_path = DOWNLOAD_DIR / f"{base_name}.mp4"
         height_map = {"1080": 1080, "720": 720, "480": 480, "360": 360}
         max_h = height_map.get(quality, 720)
         ydl_opts = {
@@ -398,9 +400,9 @@ async def download_video(
             ydl.download([url])
 
         if quality == "audio":
-            files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp3"))
+            files = list(DOWNLOAD_DIR.glob(f"{base_name}*.mp3"))
         else:
-            files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp4"))
+            files = list(DOWNLOAD_DIR.glob(f"{base_name}*.mp4"))
 
         if not files:
             await update.callback_query.edit_message_text("❌ Download failed. Try again.")
@@ -823,8 +825,10 @@ async def download_music_by_search(
     waiting_msg,
 ) -> None:
     """Search YouTube for a song and download best audio as MP3."""
-    safe_query = re.sub(r"[^\w\s-]", "", query_text).strip()
-    safe_query = re.sub(r"[-\s]+", "_", safe_query)[:50] or f"user_{user_id}_song"
+    base_query = re.sub(r"[^\w\s-]", "", query_text).strip()
+    base_query = re.sub(r"[-\s]+", "_", base_query)[:50] or f"user_{user_id}_song"
+    # ✅ Option B: add user ID into base query to avoid cross-user collisions
+    safe_query = f"{base_query}_user{user_id}"
 
     out_tmpl = str(DOWNLOAD_DIR / f"{safe_query}.%(ext)s")
 
@@ -871,7 +875,7 @@ async def download_music_by_search(
         if not yt_title:
             yt_title = "Unknown Title"
 
-        # Use the REAL YouTube title for the filename
+        # Use the REAL YouTube title for the filename base (plus user ID for safety)
         base_from_title = re.sub(r"[^\w\s-]", "", yt_title).strip()
         base_from_title = re.sub(r"[-\s]+", "_", base_from_title)[:60] or safe_query
 
@@ -899,8 +903,8 @@ async def download_music_by_search(
             await waiting_msg.edit_text("❌ Failed to download song. Try another name?")
             return
 
-        # 🔁 Rename file to match the REAL YT title
-        nice_path = candidate.with_name(base_from_title + candidate.suffix)
+        # 🔁 Rename file to match the REAL YT title + user ID (Option B style)
+        nice_path = candidate.with_name(f"{base_from_title}_user{user_id}{candidate.suffix}")
         try:
             candidate.rename(nice_path)
             candidate = nice_path
