@@ -1147,6 +1147,7 @@ def main() -> None:
             handle_text,
         )
     )
+    
 
     logger.info("🤖 Bot starting...")
     print("✅ Media Butler bot running.")
