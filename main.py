@@ -21,6 +21,7 @@ import subprocess
 import zipfile
 from typing import Dict, Any, Optional
 from pathlib import Path
+import asyncio  # ✅ ADDED
 
 from telegram import (
     Update,
@@ -358,11 +359,9 @@ async def download_video(
 
     safe_filename = re.sub(r"[^\w\s-]", "", video_title).strip()
     safe_filename = re.sub(r"[-\s]+", "_", safe_filename)[:50] or f"user_{user_id}_video"
-    # ✅ Option B: include user ID in base name to avoid cross-user collisions
-    base_name = f"{safe_filename}_user{user_id}"
 
     if quality == "audio":
-        output_path = DOWNLOAD_DIR / f"{base_name}.mp3"
+        output_path = DOWNLOAD_DIR / f"{safe_filename}.mp3"
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": str(output_path),
@@ -378,7 +377,7 @@ async def download_video(
             "noplaylist": True,
         }
     else:
-        output_path = DOWNLOAD_DIR / f"{base_name}.mp4"
+        output_path = DOWNLOAD_DIR / f"{safe_filename}.mp4"
         height_map = {"1080": 1080, "720": 720, "480": 480, "360": 360}
         max_h = height_map.get(quality, 720)
         ydl_opts = {
@@ -396,13 +395,17 @@ async def download_video(
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        # ✅ run yt-dlp in background thread (non-blocking)
+        def _do_download():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+        await asyncio.to_thread(_do_download)
 
         if quality == "audio":
-            files = list(DOWNLOAD_DIR.glob(f"{base_name}*.mp3"))
+            files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp3"))
         else:
-            files = list(DOWNLOAD_DIR.glob(f"{base_name}*.mp4"))
+            files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp4"))
 
         if not files:
             await update.callback_query.edit_message_text("❌ Download failed. Try again.")
@@ -514,7 +517,8 @@ async def split_video_parts(
             "default=noprint_wrappers=1:nokey=1",
             str(file_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # ✅ run ffprobe in thread
+        result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
         total_duration = float(result.stdout.strip() or "0")
 
         current_time = 0.0
@@ -537,7 +541,8 @@ async def split_video_parts(
                 "1",
                 str(out_file),
             ]
-            subprocess.run(cmd, capture_output=True, text=True)
+            # ✅ run ffmpeg in thread
+            await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
 
             if out_file.exists() and out_file.stat().st_size > 0:
                 parts.append(out_file)
@@ -553,7 +558,7 @@ async def split_video_parts(
                     "default=noprint_wrappers=1:nokey=1",
                     str(out_file),
                 ]
-                res_dur = subprocess.run(cmd_dur, capture_output=True, text=True)
+                res_dur = await asyncio.to_thread(subprocess.run, cmd_dur, capture_output=True, text=True)
                 try:
                     part_dur = float(res_dur.stdout.strip() or "0")
                     current_time += part_dur
@@ -584,7 +589,7 @@ async def split_video_parts(
                     "default=noprint_wrappers=1:nokey=1",
                     str(p),
                 ]
-                meta_res = subprocess.run(cmd_meta, capture_output=True, text=True)
+                meta_res = await asyncio.to_thread(subprocess.run, cmd_meta, capture_output=True, text=True)
                 if meta_res.returncode == 0:
                     lines = [ln.strip() for ln in meta_res.stdout.splitlines() if ln.strip()]
                     if len(lines) >= 2:
@@ -647,6 +652,7 @@ async def split_zip_parts(
     try:
         await update.callback_query.edit_message_text("🗜️ Creating ZIP archive...")
 
+        # zipfile is blocking but usually fast enough; can also be to_thread if needed
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(file_path, file_path.name)
 
@@ -800,7 +806,8 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "192k",
             str(out_path),
         ]
-        subprocess.run(cmd, capture_output=True, check=True)
+        # ✅ run ffmpeg in thread
+        await asyncio.to_thread(subprocess.run, cmd, capture_output=True, check=True)
 
         if out_path.exists():
             size = out_path.stat().st_size
@@ -825,10 +832,8 @@ async def download_music_by_search(
     waiting_msg,
 ) -> None:
     """Search YouTube for a song and download best audio as MP3."""
-    base_query = re.sub(r"[^\w\s-]", "", query_text).strip()
-    base_query = re.sub(r"[-\s]+", "_", base_query)[:50] or f"user_{user_id}_song"
-    # ✅ Option B: add user ID into base query to avoid cross-user collisions
-    safe_query = f"{base_query}_user{user_id}"
+    safe_query = re.sub(r"[^\w\s-]", "", query_text).strip()
+    safe_query = re.sub(r"[-\s]+", "_", safe_query)[:50] or f"user_{user_id}_song"
 
     out_tmpl = str(DOWNLOAD_DIR / f"{safe_query}.%(ext)s")
 
@@ -853,8 +858,12 @@ async def download_music_by_search(
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query_text, download=True)
+        # ✅ run yt-dlp in thread and get info
+        def _do_music():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(query_text, download=True)
+
+        info = await asyncio.to_thread(_do_music)
 
         # ---- YouTube title (REAL title from video) ----
         yt_title = None
@@ -875,7 +884,7 @@ async def download_music_by_search(
         if not yt_title:
             yt_title = "Unknown Title"
 
-        # Use the REAL YouTube title for the filename base (plus user ID for safety)
+        # Use the REAL YouTube title for the filename
         base_from_title = re.sub(r"[^\w\s-]", "", yt_title).strip()
         base_from_title = re.sub(r"[-\s]+", "_", base_from_title)[:60] or safe_query
 
@@ -903,8 +912,8 @@ async def download_music_by_search(
             await waiting_msg.edit_text("❌ Failed to download song. Try another name?")
             return
 
-        # 🔁 Rename file to match the REAL YT title + user ID (Option B style)
-        nice_path = candidate.with_name(f"{base_from_title}_user{user_id}{candidate.suffix}")
+        # 🔁 Rename file to match the REAL YT title
+        nice_path = candidate.with_name(base_from_title + candidate.suffix)
         try:
             candidate.rename(nice_path)
             candidate = nice_path
