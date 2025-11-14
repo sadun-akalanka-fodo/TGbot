@@ -19,7 +19,6 @@ import logging
 import re
 import subprocess
 import zipfile
-import asyncio   # 🔹 added
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -496,8 +495,10 @@ async def split_video_parts(
     file_path: Path,
     file_size: int,
 ) -> None:
+    """Split video into multiple 49MB parts and send each as playable Telegram video."""
     parts = []
     try:
+        # Get total duration once
         cmd = [
             "ffprobe",
             "-v",
@@ -536,7 +537,8 @@ async def split_video_parts(
             if out_file.exists() and out_file.stat().st_size > 0:
                 parts.append(out_file)
 
-                cmd_d = [
+                # get part duration (for next start)
+                cmd_dur = [
                     "ffprobe",
                     "-v",
                     "error",
@@ -546,9 +548,9 @@ async def split_video_parts(
                     "default=noprint_wrappers=1:nokey=1",
                     str(out_file),
                 ]
-                res_d = subprocess.run(cmd_d, capture_output=True, text=True)
+                res_dur = subprocess.run(cmd_dur, capture_output=True, text=True)
                 try:
-                    part_dur = float(res_d.stdout.strip() or "0")
+                    part_dur = float(res_dur.stdout.strip() or "0")
                     current_time += part_dur
                 except Exception:
                     break
@@ -557,17 +559,57 @@ async def split_video_parts(
             else:
                 break
 
+        # Send each part as a playable video
         for idx, p in enumerate(parts, 1):
             size = p.stat().st_size
             caption = f"📹 Part {idx}/{len(parts)} - {format_file_size(size)}"
+
+            # Get width, height, duration for nicer Telegram video card
+            width = height = duration = None
+            try:
+                cmd_meta = [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height,duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(p),
+                ]
+                meta_res = subprocess.run(cmd_meta, capture_output=True, text=True)
+                if meta_res.returncode == 0:
+                    lines = [ln.strip() for ln in meta_res.stdout.splitlines() if ln.strip()]
+                    if len(lines) >= 2:
+                        width = int(float(lines[0]))
+                        height = int(float(lines[1]))
+                    if len(lines) >= 3:
+                        try:
+                            duration = int(float(lines[2]))
+                        except Exception:
+                            duration = None
+            except Exception as e:
+                logger.warning(f"ffprobe meta failed for {p}: {e}")
+
             with open(p, "rb") as f:
-                await context.bot.send_document(
+                send_kwargs = dict(
                     chat_id=update.effective_chat.id,
-                    document=f,
+                    video=f,
                     caption=caption,
+                    supports_streaming=True,
                     write_timeout=180,
                     read_timeout=180,
                 )
+                if width and height:
+                    send_kwargs["width"] = width
+                    send_kwargs["height"] = height
+                if duration:
+                    send_kwargs["duration"] = duration
+
+                await context.bot.send_video(**send_kwargs)
+
             cleanup_file(p)
 
         await context.bot.send_message(
@@ -588,8 +630,6 @@ async def split_video_parts(
         if update.effective_user:
             user_sessions.pop(update.effective_user.id, None)
 
-
-# ------------- ZIP splitting (patched) -------------
 
 async def split_zip_parts(
     update: Update,
@@ -634,37 +674,14 @@ async def split_zip_parts(
                 text=instructions,
             )
 
-            # 🔧 patched upload loop: retries + delays + bigger timeouts
             for idx, p in enumerate(parts, 1):
                 size = p.stat().st_size
-                caption = f"Part {idx}/{len(parts)} - {format_file_size(size)}"
-
-                sent = False
-                attempts = 0
-                while not sent and attempts < 3:
-                    attempts += 1
-                    try:
-                        with open(p, "rb") as f:
-                            await context.bot.send_document(
-                                chat_id=update.effective_chat.id,
-                                document=f,
-                                caption=caption,
-                                write_timeout=300,
-                                read_timeout=300,
-                                connect_timeout=300,
-                            )
-                        sent = True
-                    except Exception as e:
-                        logger.error(f"Upload failed for ZIP part {idx}, attempt {attempts}: {e}")
-                        await asyncio.sleep(2)  # wait and retry
-
-                if not sent:
-                    await context.bot.send_message(
+                with open(p, "rb") as f:
+                    await context.bot.send_document(
                         chat_id=update.effective_chat.id,
-                        text=f"❌ Failed uploading ZIP part {idx}. Skipping this part.",
+                        document=f,
+                        caption=f"Part {idx}/{len(parts)} - {format_file_size(size)}",
                     )
-
-                await asyncio.sleep(1)  # small delay between parts
                 cleanup_file(p)
         else:
             with open(zip_path, "rb") as f:
@@ -672,9 +689,6 @@ async def split_zip_parts(
                     chat_id=update.effective_chat.id,
                     document=f,
                     caption=f"🗜️ ZIP Archive - {format_file_size(zip_size)}",
-                    write_timeout=300,
-                    read_timeout=300,
-                    connect_timeout=300,
                 )
 
         await context.bot.send_message(
