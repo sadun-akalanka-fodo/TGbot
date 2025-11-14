@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Media Butler Bot
+Telegram Media Butler Bot (Combined)
 
 Features:
 - Download videos from YouTube, TikTok, Instagram, Twitter, and other platforms
@@ -10,8 +10,10 @@ Features:
 - Image OCR (English + Sinhala)  -> uses ocr_image.py
 - PDF OCR (English + Sinhala)    -> uses ocr_pdf.py
 - Music search + download from YouTube as MP3 (song name)
+- Menu buttons at the bottom of chat
 
-User-friendly button-based interface with main menu.
+Env:
+- TELEGRAM_BOT_TOKEN
 """
 
 import os
@@ -55,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 50 * 1024 * 1024      # 50 MB
 PART_SIZE = 49 * 1024 * 1024          # 49 MB parts
-TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB
+TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB (Telegram limit)
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -133,9 +135,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🎵 *Convert Video to MP3* – upload a video file.\n"
         "📄 *PDF to Text (OCR)* – send a PDF file.\n"
         "🖼️ *Image Text (OCR)* – send an image.\n"
-        "🎧 *Download Music (Search)* – type song name.\n"
+        "🎧 *Download Music (Search)* – type song name.\n\n"
+        "💡 Tip: You can also *just paste a video link* directly, "
+        "I’ll detect it and ask for quality."
     )
-    await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+    await update.message.reply_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
 
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -186,7 +190,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "🎧 *Music Download Mode*\n\n"
             "Send me a song name, artist name, or both.\n"
-            "Example:\n"
+            "Examples:\n"
             "_Shape of You Ed Sheeran_\n"
             "_Dinakage Sithin - Kasun Kalhara_",
             parse_mode="Markdown",
@@ -199,13 +203,28 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ------------- Text messages (URLs / music queries) -------------
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route plain text based on current mode."""
+    """
+    Route plain text based on:
+    - If it looks like a video URL → always treat as video download (like first bot)
+    - Else, if mode == music → treat as music search
+    - Else, ask user to pick from menu
+    """
     if not update.message or not update.effective_user:
         return
 
     user_id = update.effective_user.id
-    message_text = update.message.text
+    message_text = update.message.text.strip()
 
+    # 1️⃣ If it's a supported video URL → always go to video download flow
+    if is_video_url(message_text):
+        # keep any existing session info but ensure mode=download
+        session = user_sessions.get(user_id, {})
+        session["mode"] = "download"
+        user_sessions[user_id] = session
+        await handle_video_url(update, context)
+        return
+
+    # 2️⃣ Otherwise, route by current mode
     session = user_sessions.get(user_id, {})
     mode = session.get("mode")
 
@@ -215,14 +234,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await download_music_by_search(update, context, user_id, message_text, waiting_msg)
         return
 
-    # Video download mode
-    if mode == "download":
-        await handle_video_url(update, context)
-        return
+    # (You could add more text-based modes here later)
 
-    # If no mode or other mode
+    # 3️⃣ No match → ask user to use menu
     await update.message.reply_text(
-        "Please pick what you want to do from the menu 👇",
+        "I’m not sure what to do with that.\n\n"
+        "• Paste a video link to download\n"
+        "• Or choose from the menu below 👇",
         reply_markup=get_main_menu_keyboard(),
     )
 
@@ -496,7 +514,6 @@ async def split_video_parts(
             if out_file.exists() and out_file.stat().st_size > 0:
                 parts.append(out_file)
 
-                # get part duration
                 cmd_d = [
                     "ffprobe",
                     "-v",
@@ -829,9 +846,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (
         "📚 *How to use this bot*\n\n"
         "📹 *Download Video*\n"
-        "1. Tap 'Download Video'\n"
-        "2. Send a video link\n"
-        "3. Choose quality or MP3\n\n"
+        "1. Tap 'Download Video' or just paste a video link\n"
+        "2. Choose quality (1080p, 720p, 480p, 360p, or MP3)\n\n"
         "🎵 *Convert Video to MP3*\n"
         "1. Tap 'Convert Video to MP3'\n"
         "2. Upload a video file\n\n"
@@ -859,7 +875,9 @@ def main() -> None:
     # Menu buttons
     app.add_handler(
         MessageHandler(
-            filters.Regex("^(📹 Download Video|🎵 Convert Video to MP3|📄 PDF to Text \\(OCR\\)|🖼️ Image Text \\(OCR\\)|🎧 Download Music \\(Search\\)|❓ Help)$"),
+            filters.Regex(
+                "^(📹 Download Video|🎵 Convert Video to MP3|📄 PDF to Text \\(OCR\\)|🖼️ Image Text \\(OCR\\)|🎧 Download Music \\(Search\\)|❓ Help)$"
+            ),
             handle_menu_choice,
         )
     )
