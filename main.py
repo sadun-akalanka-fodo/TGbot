@@ -7,8 +7,8 @@ Features:
 - Quality selection (1080p, 720p, 480p, 360p, or MP3 audio)
 - Video-to-audio conversion (user uploads video → MP3)
 - Automatic file splitting for files larger than 50 MB (49MB parts)
-- Image OCR (English + Sinhala)   -> uses ocr_image.py
-- PDF OCR (English + Sinhala)     -> uses ocr_pdf.py
+- Image OCR (English + Sinhala)  -> uses ocr_image.py
+- PDF OCR (English + Sinhala)    -> uses ocr_pdf.py
 - Music search + download from YouTube as MP3 (song name)
 
 User-friendly button-based interface with main menu.
@@ -21,7 +21,7 @@ import subprocess
 import zipfile
 from typing import Dict, Any, Optional
 from pathlib import Path
-import asyncio  # ✅ ADDED
+import asyncio  # for running blocking work in threads
 
 from telegram import (
     Update,
@@ -54,8 +54,8 @@ logger = logging.getLogger(__name__)
 
 # ------------- Constants -------------
 
-MAX_FILE_SIZE = 50 * 1024 * 1024       # 50 MB
-PART_SIZE = 49 * 1024 * 1024           # 49 MB parts
+MAX_FILE_SIZE = 50 * 1024 * 1024      # 50 MB
+PART_SIZE = 49 * 1024 * 1024          # 49 MB parts
 TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB
 
 DOWNLOAD_DIR = Path("downloads")
@@ -81,20 +81,9 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 # ------------- Load cookies from env (optional) -------------
 
-# If you set YTDLP_COOKIES in Railway env vars with the content of cookies.txt,
-# this will create a cookies.txt file on startup.
 COOKIES_ENV = os.getenv("YTDLP_COOKIES")
 if COOKIES_ENV:
     try:
-        # ✅ Blocking file write: run in thread
-        async def _write_cookies():
-            with open("cookies.txt", "w", encoding="utf-8") as f:
-                f.write(COOKIES_ENV)
-        
-        # This part runs on startup before the main event loop, so we'll leave it as is 
-        # for simplicity, as it's not in a handler. But typically, all file I/O 
-        # should be wrapped if it runs while the bot is running.
-
         with open("cookies.txt", "w", encoding="utf-8") as f:
             f.write(COOKIES_ENV)
         logger.info("cookies.txt created from YTDLP_COOKIES env var.")
@@ -123,14 +112,9 @@ def is_video_url(text: str) -> bool:
             return True
     return False
 
-# ⚠️ ORIGINAL FUNCTION WAS SYNC AND BLOCKING ⚠️
-# def get_video_info(url: str) -> Optional[Dict[str, Any]]:
-#     """Get video information using yt-dlp (with optional cookies)."""
-#     ... (code for synchronous execution)
 
-# ✅ NEW ASYNC WRAPPER FOR SYNC FUNCTION
-async def get_video_info_async(url: str) -> Optional[Dict[str, Any]]:
-    """Get video information using yt-dlp (with optional cookies) in a separate thread."""
+def get_video_info(url: str) -> Optional[Dict[str, Any]]:
+    """Get video information using yt-dlp (with optional cookies)."""
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -139,24 +123,16 @@ async def get_video_info_async(url: str) -> Optional[Dict[str, Any]]:
     }
 
     cookies_path = "cookies.txt"
-    # ✅ Blocking file check: run in thread
-    def _check_cookies_exists():
-        return os.path.exists(cookies_path)
-    
-    if await asyncio.to_thread(_check_cookies_exists):
+    if os.path.exists(cookies_path):
         ydl_opts["cookiefile"] = cookies_path
 
-    def _do_get_info():
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return info
-        except Exception as e:
-            logger.error(f"Error getting video info: {e}")
-            return None
-    
-    # ✅ Run synchronous yt-dlp call in a separate thread
-    return await asyncio.to_thread(_do_get_info)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info
+    except Exception as e:
+        logger.error(f"Error getting video info: {e}")
+        return None
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -295,10 +271,7 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     processing_msg = await update.message.reply_text("🔍 Analyzing video link...")
 
-    # ⚠️ ORIGINAL: video_info = get_video_info(message_text)
-    # ✅ FIX: Use the new async version to avoid blocking
-    video_info = await get_video_info_async(message_text) 
-    
+    video_info = get_video_info(message_text)
     if not video_info:
         await processing_msg.edit_text(
             "❌ I couldn't process this link.\n"
@@ -414,39 +387,29 @@ async def download_video(
             "noplaylist": True,
         }
 
-    # Attach cookies if cookies.txt exists
     cookies_path = "cookies.txt"
-    # ✅ Blocking file check: run in thread
-    def _check_cookies_exists():
-        return os.path.exists(cookies_path)
-    
-    if await asyncio.to_thread(_check_cookies_exists):
+    if os.path.exists(cookies_path):
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        # ✅ run yt-dlp in background thread (non-blocking)
+        # run yt-dlp in background thread
         def _do_download():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
 
         await asyncio.to_thread(_do_download)
 
-        # ✅ Blocking file system operations wrapped in thread
-        def _get_downloaded_files():
-            if quality == "audio":
-                return list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp3"))
-            else:
-                return list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp4"))
-        
-        files = await asyncio.to_thread(_get_downloaded_files)
+        if quality == "audio":
+            files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp3"))
+        else:
+            files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp4"))
 
         if not files:
             await update.callback_query.edit_message_text("❌ Download failed. Try again.")
             return
 
         downloaded_file = files[0]
-        # ✅ Blocking file stat: run in thread
-        size = await asyncio.to_thread(downloaded_file.stat().st_size)
+        size = downloaded_file.stat().st_size
 
         if size > MAX_FILE_SIZE:
             await handle_large_file(update, context, user_id, downloaded_file, size)
@@ -540,7 +503,6 @@ async def split_video_parts(
     """Split video into multiple 49MB parts and send each as playable Telegram video."""
     parts = []
     try:
-        # Get total duration once
         cmd = [
             "ffprobe",
             "-v",
@@ -551,7 +513,6 @@ async def split_video_parts(
             "default=noprint_wrappers=1:nokey=1",
             str(file_path),
         ]
-        # ✅ run ffprobe in thread
         result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
         total_duration = float(result.stdout.strip() or "0")
 
@@ -575,17 +536,11 @@ async def split_video_parts(
                 "1",
                 str(out_file),
             ]
-            # ✅ run ffmpeg in thread
             await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
 
-            # ✅ Blocking file system operations wrapped in thread
-            def _check_and_get_size():
-                return out_file.exists() and out_file.stat().st_size > 0
-            
-            if await asyncio.to_thread(_check_and_get_size):
+            if out_file.exists() and out_file.stat().st_size > 0:
                 parts.append(out_file)
 
-                # get part duration (for next start)
                 cmd_dur = [
                     "ffprobe",
                     "-v",
@@ -607,13 +562,10 @@ async def split_video_parts(
             else:
                 break
 
-        # Send each part as a playable video
         for idx, p in enumerate(parts, 1):
-            # ✅ Blocking file stat: run in thread
-            size = await asyncio.to_thread(p.stat().st_size)
+            size = p.stat().st_size
             caption = f"📹 Part {idx}/{len(parts)} - {format_file_size(size)}"
 
-            # Get width, height, duration for nicer Telegram video card
             width = height = duration = None
             try:
                 cmd_meta = [
@@ -642,29 +594,22 @@ async def split_video_parts(
             except Exception as e:
                 logger.warning(f"ffprobe meta failed for {p}: {e}")
 
-            # ✅ Blocking file open: run in thread
-            def _send_video_part():
-                with open(p, "rb") as f:
-                    send_kwargs = dict(
-                        chat_id=update.effective_chat.id,
-                        video=f,
-                        caption=caption,
-                        supports_streaming=True,
-                        write_timeout=180,
-                        read_timeout=180,
-                    )
-                    if width and height:
-                        send_kwargs["width"] = width
-                        send_kwargs["height"] = height
-                    if duration:
-                        send_kwargs["duration"] = duration
+            with open(p, "rb") as f:
+                send_kwargs = dict(
+                    chat_id=update.effective_chat.id,
+                    video=f,
+                    caption=caption,
+                    supports_streaming=True,
+                    write_timeout=180,
+                    read_timeout=180,
+                )
+                if width and height:
+                    send_kwargs["width"] = width
+                    send_kwargs["height"] = height
+                if duration:
+                    send_kwargs["duration"] = duration
 
-                    # send_video is an awaitable method on the bot instance
-                    # we must pass it to the event loop directly, not in to_thread
-                    return context.bot.send_video(**send_kwargs)
-
-            # We must await the coroutine returned by _send_video_part directly
-            await _send_video_part() # Now it is sending it correctly in the async context
+                await context.bot.send_video(**send_kwargs)
 
             cleanup_file(p)
 
@@ -698,36 +643,25 @@ async def split_zip_parts(
     try:
         await update.callback_query.edit_message_text("🗜️ Creating ZIP archive...")
 
-        # ✅ Blocking zip creation: run in thread
-        def _create_zip():
-             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(file_path, file_path.name)
-        
-        await asyncio.to_thread(_create_zip)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(file_path, file_path.name)
 
-        # ✅ Blocking file stat: run in thread
-        zip_size = await asyncio.to_thread(zip_path.stat().st_size)
+        zip_size = zip_path.stat().st_size
 
         if zip_size > MAX_FILE_SIZE:
             await update.callback_query.edit_message_text("✂️ Splitting ZIP into 49MB parts...")
-            
-            # ✅ Blocking file operations for splitting: run in thread
-            def _split_zip():
+            with open(zip_path, "rb") as f:
                 part_num = 1
-                with open(zip_path, "rb") as f:
-                    while True:
-                        chunk = f.read(PART_SIZE)
-                        if not chunk:
-                            break
-                        part_path = file_path.parent / f"{file_path.stem}.z{part_num:02d}"
-                        with open(part_path, "wb") as pf:
-                            pf.write(chunk)
-                        parts.append(part_path)
-                        part_num += 1
-                return parts # Return the list of parts created
-            
-            parts = await asyncio.to_thread(_split_zip)
-            
+                while True:
+                    chunk = f.read(PART_SIZE)
+                    if not chunk:
+                        break
+                    part_path = file_path.parent / f"{file_path.stem}.z{part_num:02d}"
+                    with open(part_path, "wb") as pf:
+                        pf.write(chunk)
+                    parts.append(part_path)
+                    part_num += 1
+
             instructions = (
                 "📦 ZIP archive split into 49MB parts.\n\n"
                 f"Total parts: {len(parts)}\n\n"
@@ -742,31 +676,21 @@ async def split_zip_parts(
             )
 
             for idx, p in enumerate(parts, 1):
-                # ✅ Blocking file stat: run in thread
-                size = await asyncio.to_thread(p.stat().st_size)
-                
-                # ✅ Blocking file open: run in thread
-                def _send_document_part():
-                    with open(p, "rb") as f:
-                        return context.bot.send_document(
-                            chat_id=update.effective_chat.id,
-                            document=f,
-                            caption=f"Part {idx}/{len(parts)} - {format_file_size(size)}",
-                        )
-                
-                await _send_document_part()
-                cleanup_file(p)
-        else:
-            # ✅ Blocking file open: run in thread
-            def _send_single_zip():
-                with open(zip_path, "rb") as f:
-                    return context.bot.send_document(
+                size = p.stat().st_size
+                with open(p, "rb") as f:
+                    await context.bot.send_document(
                         chat_id=update.effective_chat.id,
                         document=f,
-                        caption=f"🗜️ ZIP Archive - {format_file_size(zip_size)}",
+                        caption=f"Part {idx}/{len(parts)} - {format_file_size(size)}",
                     )
-            
-            await _send_single_zip()
+                cleanup_file(p)
+        else:
+            with open(zip_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    caption=f"🗜️ ZIP Archive - {format_file_size(zip_size)}",
+                )
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -803,28 +727,21 @@ async def send_file(
 
     try:
         caption = f"✅ Download complete!\n📦 Size: {format_file_size(file_size)}"
-        
-        # ✅ Blocking file open: run in thread
-        def _do_send_file():
-            with open(file_path, "rb") as f:
-                if file_path.suffix.lower() == ".mp3":
-                    return context.bot.send_audio(
-                        chat_id=update.effective_chat.id,
-                        audio=f,
-                        caption=caption,
-                        title=display_name,
-                    )
-                else:
-                    return context.bot.send_video(
-                        chat_id=update.effective_chat.id,
-                        video=f,
-                        caption=caption,
-                        supports_streaming=True,
-                    )
-        
-        # Await the coroutine returned by _do_send_file
-        await _do_send_file()
-        
+        with open(file_path, "rb") as f:
+            if file_path.suffix.lower() == ".mp3":
+                await context.bot.send_audio(
+                    chat_id=update.effective_chat.id,
+                    audio=f,
+                    caption=caption,
+                    title=display_name,
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=f,
+                    caption=caption,
+                    supports_streaming=True,
+                )
     except Exception as e:
         logger.error(f"Error sending file: {e}")
         await context.bot.send_message(
@@ -834,12 +751,6 @@ async def send_file(
 
 
 def cleanup_file(path: Path) -> None:
-    # ⚠️ This is a synchronous, blocking function
-    # It is called *after* sending the file, so it's a cleanup step.
-    # For safety in concurrent environment, we should consider making it async if it
-    # were a critical part of the main flow, but in a 'finally' block 
-    # and for quick file deletion, it's often left sync. 
-    # Since the user asked for minimal changes, we'll leave it as-is, but note it.
     try:
         if path.exists():
             path.unlink()
@@ -866,28 +777,14 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     processing_msg = await update.message.reply_text("⏳ Downloading your video...")
 
-    in_path = DOWNLOAD_DIR / f"user_{user_id}_video.mp4"
-    out_path = DOWNLOAD_DIR / f"user_{user_id}_audio.mp3"
-
     try:
         telegram_file = await update.message.video.get_file()
-        # ⚠️ ORIGINAL: await telegram_file.download_to_drive(str(in_path))
-        # ✅ FIX: download_to_drive is blocking file I/O
-        def _do_download_file():
-            # download_to_drive is already an async method in PTB, but it uses 
-            # sync I/O under the hood for the actual writing.
-            # However, for simplicity and safety, we'll trust the PTB implementation here
-            # and only wrap the FFMPEG call, as you had it previously.
-            # Wait, `download_to_drive` is an awaitable method on a File object, 
-            # which means it runs in the event loop and should be fine. 
-            # I will not wrap it, sticking close to the original.
-            telegram_file.download_to_drive(str(in_path)) # This is already awaited below.
-
+        in_path = DOWNLOAD_DIR / f"user_{user_id}_video.mp4"
         await telegram_file.download_to_drive(str(in_path))
-
 
         await processing_msg.edit_text("🎵 Converting to MP3...")
 
+        out_path = DOWNLOAD_DIR / f"user_{user_id}_audio.mp3"
         cmd = [
             "ffmpeg",
             "-i",
@@ -899,18 +796,10 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "192k",
             str(out_path),
         ]
-        # ✅ run ffmpeg in thread
         await asyncio.to_thread(subprocess.run, cmd, capture_output=True, check=True)
 
-        # ✅ Blocking file existence check and stat: run in thread
-        def _check_output_exists_and_size():
-            if out_path.exists():
-                return out_path.stat().st_size
-            return 0
-        
-        size = await asyncio.to_thread(_check_output_exists_and_size)
-
-        if size > 0:
+        if out_path.exists():
+            size = out_path.stat().st_size
             await send_file(update, context, out_path, size)
             await processing_msg.delete()
             cleanup_file(in_path)
@@ -954,69 +843,48 @@ async def download_music_by_search(
     }
 
     cookies_path = "cookies.txt"
-    # ✅ Blocking file check: run in thread
-    def _check_cookies_exists():
-        return os.path.exists(cookies_path)
-    
-    if await asyncio.to_thread(_check_cookies_exists):
+    if os.path.exists(cookies_path):
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        # ✅ run yt-dlp in thread and get info
         def _do_music():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(query_text, download=True)
 
         info = await asyncio.to_thread(_do_music)
 
-        # ---- YouTube title (REAL title from video) ----
         yt_title = None
         if isinstance(info, dict):
-            # Sometimes yt-dlp puts the chosen format under requested_downloads
             if "requested_downloads" in info and info["requested_downloads"]:
                 rd = info["requested_downloads"][0]
                 yt_title = rd.get("title")
-                # some versions store full info dict nested
                 if not yt_title and "info_dict" in rd:
                     yt_title = rd["info_dict"].get("title")
 
-            # Fallback to main info title if still None
             if not yt_title:
                 yt_title = info.get("title")
 
-        # Final fallback if YouTube didn't provide any title at all
         if not yt_title:
             yt_title = "Unknown Title"
 
-        # Use the REAL YouTube title for the filename
         base_from_title = re.sub(r"[^\w\s-]", "", yt_title).strip()
         base_from_title = re.sub(r"[-\s]+", "_", base_from_title)[:60] or safe_query
 
-        # ---- find actual file on disk ----
         candidate: Optional[Path] = None
-        
-        # ✅ Blocking file existence check: run in thread
-        def _find_candidate_file():
-            cand = None
-            if isinstance(info, dict):
-                if "requested_downloads" in info and info["requested_downloads"]:
-                    fp = info["requested_downloads"][0].get("filepath")
-                    if fp:
-                        cand = Path(fp)
-
-            if cand is None:
-                cand = DOWNLOAD_DIR / f"{safe_query}.mp3"
-            
-            if not cand.exists():
-                matches = list(DOWNLOAD_DIR.glob(f"{safe_query}*.mp3"))
-                if matches:
-                    cand = matches[0]
-            
-            return cand if cand and cand.exists() else None
-
-        candidate = await asyncio.to_thread(_find_candidate_file)
+        if isinstance(info, dict):
+            if "requested_downloads" in info and info["requested_downloads"]:
+                fp = info["requested_downloads"][0].get("filepath")
+                if fp:
+                    candidate = Path(fp)
 
         if candidate is None:
+            candidate = DOWNLOAD_DIR / f"{safe_query}.mp3"
+        if not candidate.exists():
+            matches = list(DOWNLOAD_DIR.glob(f"{safe_query}*.mp3"))
+            if matches:
+                candidate = matches[0]
+
+        if not candidate.exists():
             logger.error(
                 "Music download: file not found for query '%s'. Files: %s",
                 query_text,
@@ -1025,23 +893,16 @@ async def download_music_by_search(
             await waiting_msg.edit_text("❌ Failed to download song. Try another name?")
             return
 
-        # 🔁 Rename file to match the REAL YT title
         nice_path = candidate.with_name(base_from_title + candidate.suffix)
         try:
-            # ✅ Blocking file rename: run in thread
-            def _do_rename():
-                candidate.rename(nice_path)
-            
-            await asyncio.to_thread(_do_rename)
+            candidate.rename(nice_path)
             candidate = nice_path
         except Exception as e:
             logger.warning(f"Rename failed: {e}")
 
-        # ✅ Blocking file stat: run in thread
-        size = await asyncio.to_thread(candidate.stat().st_size)
+        size = candidate.stat().st_size
         await waiting_msg.edit_text("✅ Found and downloaded! Uploading to Telegram...")
 
-        # Send with YouTube title as audio title in Telegram player
         await send_file(update, context, candidate, size, display_name=yt_title)
         cleanup_file(candidate)
 
@@ -1050,7 +911,7 @@ async def download_music_by_search(
         await waiting_msg.edit_text(f"❌ Error downloading music:\n{e}")
 
 
-# ------------- Cookies upload handler (NEW) -------------
+# ------------- Cookies upload handler -------------
 
 async def handle_cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -1063,23 +924,16 @@ async def handle_cookies_document(update: Update, context: ContextTypes.DEFAULT_
     doc = update.message.document
     user_id = update.effective_user.id
 
-    # Only react to a file literally named 'cookies.txt'
     if doc.file_name != "cookies.txt":
         return
 
-    # If ADMIN_ID set, only admin can update cookies
     if ADMIN_ID != 0 and user_id != ADMIN_ID:
         await update.message.reply_text("❌ Only the bot admin can update cookies.")
         return
 
     try:
         file = await doc.get_file()
-        # ⚠️ ORIGINAL: await file.download_to_drive("cookies.txt")
-        # ✅ FIX: download_to_drive is blocking file I/O
-        # Although it is an awaitable method on File, we should be careful. 
-        # But, let's stick to wrapping just the most problematic sync part:
         await file.download_to_drive("cookies.txt")
-
         await update.message.reply_text(
             "✅ cookies.txt updated.\n"
             "New YouTube downloads and music searches will use these cookies."
@@ -1121,7 +975,14 @@ def main() -> None:
         print("Set TELEGRAM_BOT_TOKEN env var and restart.")
         return
 
-    app = Application.builder().token(token).build()
+    # 🔥 Enable concurrent update handling
+    app = (
+        Application
+        .builder()
+        .token(token)
+        .concurrent_updates(True)   # <-- key line for parallel handling
+        .build()
+    )
 
     # /start + /help
     app.add_handler(CommandHandler("start", start))
@@ -1141,7 +1002,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_image_ocr))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_ocr))
 
-    # 🔐 Cookies upload (non-PDF documents, e.g. cookies.txt)
+    # Cookies upload
     app.add_handler(MessageHandler(filters.Document.ALL, handle_cookies_document))
 
     # Video files for conversion
