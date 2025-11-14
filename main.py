@@ -8,11 +8,12 @@ Features:
 - Video-to-audio conversion
 - Automatic file splitting for files larger than 50 MB (49MB parts)
 - PDF OCR (English + Sinhala) – send a PDF to extract text
+- Image OCR (English + Sinhala) – send an image to extract text
+- Music downloader: search song name on YouTube and download as MP3
 - User-friendly button-based interface with main menu
 """
 
 import os
-import asyncio
 import logging
 import re
 import subprocess
@@ -20,7 +21,13 @@ import zipfile
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -31,8 +38,9 @@ from telegram.ext import (
 )
 import yt_dlp
 
-# 🔹 import OCR handler from separate file
+# 🔹 OCR handlers from separate files
 from ocr_pdf import handle_pdf_ocr
+from ocr_image import handle_image_ocr
 
 # Configure logging
 logging.basicConfig(
@@ -42,9 +50,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB in bytes
-PART_SIZE = 49 * 1024 * 1024  # 49 MB per part
-TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB (Telegram limit)
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+PART_SIZE = 49 * 1024 * 1024      # 49 MB parts for splitting
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
@@ -70,8 +77,10 @@ def get_main_menu_keyboard():
     keyboard = [
         [KeyboardButton("📹 Download Video")],
         [KeyboardButton("🎵 Convert Video to MP3")],
+        [KeyboardButton("🎧 Download Music (Search)")],
         [KeyboardButton("📄 PDF to Text (OCR)")],
-        [KeyboardButton("❓ Help")]
+        [KeyboardButton("🖼️ Image to Text (OCR)")],
+        [KeyboardButton("❓ Help")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -114,14 +123,19 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size:.2f} TB"
 
 
+# ============================
+#      /start COMMAND
+# ============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send welcome message when /start command is issued."""
     welcome_message = (
-        "👋 Welcome to the Video Downloader Bot!\n\n"
+        "👋 Welcome to the Multi-Tool Bot!\n\n"
         "Choose what you want to do:\n\n"
-        "📹 Download Video - Download from YouTube, TikTok, Instagram, etc.\n"
-        "🎵 Convert Video to MP3 - Convert any video file to MP3 audio\n"
-        "📄 PDF to Text (OCR) - Send a PDF and I'll extract English + Sinhala text\n\n"
+        "📹 Download Video\n"
+        "🎵 Convert Video to MP3\n"
+        "🎧 Download Music (Search by name)\n"
+        "📄 PDF to Text (OCR)\n"
+        "🖼️ Image to Text (OCR)\n\n"
         "Select an option from the menu below!"
     )
     await update.message.reply_text(
@@ -130,6 +144,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ============================
+#       MENU HANDLER
+# ============================
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle main menu button selections."""
     if not update.effective_user or not update.message:
@@ -139,10 +156,9 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.message.text
     
     if text == "📹 Download Video":
-        # Set user mode to download
         user_sessions[user_id] = {'mode': 'download'}
         await update.message.reply_text(
-            "📹 Video Download Mode\n\n"
+            "📹 *Video Download Mode*\n\n"
             "Send me a video link from:\n"
             "• YouTube\n"
             "• TikTok\n"
@@ -151,104 +167,152 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "• Facebook\n"
             "• Vimeo\n"
             "• And many more!\n\n"
-            "Just paste the link and I'll help you download it!"
+            "Just paste the link and I'll help you download it!",
+            reply_markup=get_main_menu_keyboard()
         )
     
     elif text == "🎵 Convert Video to MP3":
-        # Set user mode to convert
         user_sessions[user_id] = {'mode': 'convert'}
         await update.message.reply_text(
-            "🎵 Video to MP3 Converter\n\n"
-            "Send me any video file and I'll convert it to MP3 audio for you!\n\n"
-            "Just upload the video file."
+            "🎵 *Video → MP3 Converter*\n\n"
+            "Send me any video file and I'll convert it to MP3 audio for you!",
+            reply_markup=get_main_menu_keyboard()
+        )
+    
+    elif text == "🎧 Download Music (Search)":
+        user_sessions[user_id] = {'mode': 'music'}
+        await update.message.reply_text(
+            "🎧 *Music Download Mode*\n\n"
+            "Send me a song name, artist name, or both.\n"
+            "Example:\n"
+            "• _Shape of You Ed Sheeran_\n"
+            "• _Dinakage Sithin - Kasun Kalhara_",
+            reply_markup=get_main_menu_keyboard()
         )
     
     elif text == "📄 PDF to Text (OCR)":
         await update.message.reply_text(
-            "📄 PDF OCR Mode\n\n"
+            "📄 *PDF OCR Mode*\n\n"
             "Send me a PDF with **printed** English or Sinhala text.\n"
             "I'll extract the text and send it back.\n\n"
-            "⚠ Handwriting is NOT supported."
+            "⚠ Handwriting is *not* supported.",
+            reply_markup=get_main_menu_keyboard()
+        )
+    
+    elif text == "🖼️ Image to Text (OCR)":
+        await update.message.reply_text(
+            "🖼️ *Image OCR Mode*\n\n"
+            "Send me a clear image with printed English or Sinhala text.\n"
+            "I'll read the text and send it back.\n\n"
+            "⚠ Handwriting is *not* supported.",
+            reply_markup=get_main_menu_keyboard()
         )
     
     elif text == "❓ Help":
         await help_command(update, context)
 
 
+# ============================
+#   TEXT MESSAGE HANDLER
+# ============================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle text messages (URLs)."""
+    """Handle text messages: video URLs or music search queries."""
     if not update.effective_user or not update.message:
         return
     
     user_id = update.effective_user.id
-    message_text = update.message.text
-    
-    # Check if user has selected download mode
-    if user_id not in user_sessions or user_sessions[user_id].get('mode') != 'download':
+    message_text = (update.message.text or "").strip()
+    session = user_sessions.get(user_id)
+    mode = session.get('mode') if session else None
+
+    # If no mode selected
+    if mode not in ('download', 'music'):
         await update.message.reply_text(
             "Please select an option from the menu first!",
             reply_markup=get_main_menu_keyboard()
         )
         return
     
-    # Check if it's a video URL
-    if not is_video_url(message_text):
-        await update.message.reply_text(
-            "❌ This doesn't look like a supported video URL.\n"
-            "Please send a link from YouTube, TikTok, Instagram, Twitter, or other supported platforms."
-        )
-        return
-    
-    # Send processing message
-    processing_msg = await update.message.reply_text("🔍 Analyzing video link...")
-    
-    # Get video information
-    video_info = get_video_info(message_text)
-    
-    if not video_info:
+    # =====================
+    #  VIDEO DOWNLOAD MODE
+    # =====================
+    if mode == 'download':
+        if not is_video_url(message_text):
+            await update.message.reply_text(
+                "❌ This doesn't look like a supported video URL.\n"
+                "Please send a link from YouTube, TikTok, Instagram, Twitter, or other supported platforms."
+            )
+            return
+        
+        # Send processing message
+        processing_msg = await update.message.reply_text("🔍 Analyzing video link...")
+        
+        # Get video information
+        video_info = get_video_info(message_text)
+        
+        if not video_info:
+            await processing_msg.edit_text(
+                "❌ Sorry, I couldn't process this video link.\n"
+                "Please make sure the link is correct and the video is publicly accessible."
+            )
+            return
+        
+        # Store video URL and info in user session
+        user_sessions[user_id] = {
+            'mode': 'download',
+            'url': message_text,
+            'video_info': video_info,
+            'title': video_info.get('title', 'Unknown'),
+        }
+        
+        # Create quality selection keyboard with 1080p option
+        keyboard = [
+            [
+                InlineKeyboardButton("📺 1080p (Full HD)", callback_data="quality_1080"),
+                InlineKeyboardButton("📺 720p (HD)", callback_data="quality_720"),
+            ],
+            [
+                InlineKeyboardButton("📺 480p", callback_data="quality_480"),
+                InlineKeyboardButton("📺 360p", callback_data="quality_360"),
+            ],
+            [
+                InlineKeyboardButton("🎵 MP3 Audio", callback_data="quality_audio"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        title = video_info.get('title', 'Unknown')[:100]  # Limit title length
+        duration = video_info.get('duration', 0)
+        duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown"
+        
         await processing_msg.edit_text(
-            "❌ Sorry, I couldn't process this video link.\n"
-            "Please make sure the link is correct and the video is publicly accessible."
+            f"✅ Video found!\n\n"
+            f"📝 Title: {title}\n"
+            f"⏱️ Duration: {duration_str}\n\n"
+            f"Please select the quality you want to download:",
+            reply_markup=reply_markup
         )
         return
     
-    # Store video URL and info in user session
-    user_sessions[user_id] = {
-        'mode': 'download',
-        'url': message_text,
-        'video_info': video_info,
-        'title': video_info.get('title', 'Unknown'),
-    }
-    
-    # Create quality selection keyboard with 1080p option
-    keyboard = [
-        [
-            InlineKeyboardButton("📺 1080p (Full HD)", callback_data="quality_1080"),
-            InlineKeyboardButton("📺 720p (HD)", callback_data="quality_720"),
-        ],
-        [
-            InlineKeyboardButton("📺 480p", callback_data="quality_480"),
-            InlineKeyboardButton("📺 360p", callback_data="quality_360"),
-        ],
-        [
-            InlineKeyboardButton("🎵 MP3 Audio", callback_data="quality_audio"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    title = video_info.get('title', 'Unknown')[:100]  # Limit title length
-    duration = video_info.get('duration', 0)
-    duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown"
-    
-    await processing_msg.edit_text(
-        f"✅ Video found!\n\n"
-        f"📝 Title: {title}\n"
-        f"⏱️ Duration: {duration_str}\n\n"
-        f"Please select the quality you want to download:",
-        reply_markup=reply_markup
-    )
+    # =====================
+    #    MUSIC SEARCH MODE
+    # =====================
+    if mode == 'music':
+        if not message_text:
+            await update.message.reply_text("❗ Please send a song name or artist.")
+            return
+        
+        waiting_msg = await update.message.reply_text(
+            f"🎧 Searching YouTube for:\n`{message_text}`",
+            parse_mode="Markdown"
+        )
+        
+        await download_music_by_search(update, context, user_id, message_text, waiting_msg)
 
 
+# ============================
+#  QUALITY SELECTION HANDLER
+# ============================
 async def handle_quality_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle quality selection callback."""
     query = update.callback_query
@@ -285,6 +349,9 @@ async def handle_quality_selection(update: Update, context: ContextTypes.DEFAULT
     await download_video(update, context, user_id, session)
 
 
+# ============================
+#    VIDEO DOWNLOAD LOGIC
+# ============================
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, session: Dict[str, Any]) -> None:
     """Download video with selected quality."""
     url = session['url']
@@ -330,10 +397,8 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         
         # Find the actual downloaded file (yt-dlp might modify extension)
         if quality == 'audio':
-            # For audio, look for .mp3 file
             downloaded_files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp3"))
         else:
-            # For video, look for .mp4 file
             downloaded_files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp4"))
         
         if not downloaded_files:
@@ -345,12 +410,9 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         
         # Check file size and handle accordingly
         if file_size > MAX_FILE_SIZE:
-            # Don't cleanup yet - file needed for splitting after user chooses option
             await handle_large_file(update, context, user_id, downloaded_file, file_size)
         else:
-            # Send the file directly
             await send_file(update, context, downloaded_file, file_size)
-            # Cleanup after sending
             cleanup_file(downloaded_file)
             if user_id in user_sessions:
                 del user_sessions[user_id]
@@ -363,6 +425,60 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         )
 
 
+# ============================
+#     MUSIC SEARCH DOWNLOAD
+# ============================
+async def download_music_by_search(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    query_text: str,
+    waiting_msg
+) -> None:
+    """Search YouTube for a song and download best audio as MP3."""
+    # Safe filename based on query
+    safe_query = re.sub(r'[^\w\s-]', '', query_text).strip()
+    safe_query = re.sub(r'[-\s]+', '_', safe_query)[:50] or f"user_{user_id}_song"
+    output_path = DOWNLOAD_DIR / f"{safe_query}.mp3"
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': str(output_path),
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'default_search': 'ytsearch1',  # search and pick first result
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query_text, download=True)
+        
+        if not output_path.exists():
+            await waiting_msg.edit_text("❌ Failed to download song. Try another name?")
+            return
+        
+        file_size = output_path.stat().st_size
+        await waiting_msg.edit_text("✅ Found and downloaded! Uploading to Telegram...")
+        
+        await send_file(update, context, output_path, file_size)
+        cleanup_file(output_path)
+
+        # Keep mode = music so user can send another song name
+
+    except Exception as e:
+        logger.error(f"Music download error: {e}")
+        await waiting_msg.edit_text(f"❌ Error downloading music:\n{e}")
+
+
+# ============================
+#   LARGE FILE HANDLING
+# ============================
 async def handle_large_file(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, file_path: Path, file_size: int) -> None:
     """Handle files larger than 50 MB - ask user for splitting preference."""
     session = user_sessions.get(user_id, {})
@@ -416,7 +532,7 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     parts = []  # Track all created parts for cleanup
     
     try:
-        # Get video duration to calculate approximate number of parts
+        # Get video duration
         cmd = [
             'ffprobe', '-v', 'error', '-show_entries', 
             'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', 
@@ -430,29 +546,27 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             "This may take a while..."
         )
         
-        # Split video using ffmpeg with file size limit
         current_time = 0
         part_num = 1
         
         while current_time < total_duration:
             output_file = file_path.parent / f"{file_path.stem}_part{part_num}{file_path.suffix}"
             
-            # Use -fs flag to limit file size to 49MB
             cmd = [
                 'ffmpeg', '-i', str(file_path),
                 '-ss', str(current_time),
-                '-fs', '49M',  # Limit file size to 49MB
+                '-fs', '49M',
                 '-c', 'copy',
                 '-avoid_negative_ts', '1',
                 str(output_file)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            subprocess.run(cmd, capture_output=True, text=True)
             
             if output_file.exists() and output_file.stat().st_size > 0:
                 parts.append(output_file)
                 
-                # Get duration of the created part to calculate next start time
+                # Get duration of this part
                 cmd_duration = [
                     'ffprobe', '-v', 'error', '-show_entries',
                     'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
@@ -463,14 +577,12 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     part_duration = float(part_duration_result.stdout.strip())
                     current_time += part_duration
                 except:
-                    # If we can't get duration, break to avoid infinite loop
                     break
                 
                 part_num += 1
             else:
                 break
             
-            # Safety check to prevent infinite loop
             if part_num > 100:
                 break
         
@@ -482,12 +594,11 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     chat_id=update.effective_chat.id,
                     document=f,
                     caption=f"Part {idx}/{len(parts)} - {format_file_size(part_size_bytes)}",
-                    write_timeout=180,   # 3 minutes upload time
-                    read_timeout=180     # 3 minutes response wait
+                    write_timeout=180,
+                    read_timeout=180
                 )
             cleanup_file(part_file)
 
-        
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="✅ All parts sent successfully!"
@@ -499,14 +610,10 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             chat_id=update.effective_chat.id,
             text=f"❌ Error splitting video: {str(e)}"
         )
-        # Cleanup any partial parts that were created
-        logger.info(f"Cleaning up {len(parts)} partial video parts after error")
         for part_file in parts:
             cleanup_file(part_file)
     
     finally:
-        # Always cleanup original file and session
-        logger.info(f"Cleaning up original file: {file_path}")
         cleanup_file(file_path)
         user_id = update.effective_user.id if update.effective_user else None
         if user_id and user_id in user_sessions:
@@ -516,10 +623,9 @@ async def split_video_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, file_size: int) -> None:
     """Split file into 49MB ZIP parts."""
     zip_path = file_path.parent / f"{file_path.stem}.zip"
-    parts = []  # Track all created parts for cleanup
+    parts = []
     
     try:
-        # Create ZIP of the original file
         await update.callback_query.edit_message_text("🗜️ Creating ZIP archive...")
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -527,7 +633,6 @@ async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, fi
         
         zip_size = zip_path.stat().st_size
         
-        # If ZIP is still too large, split it into 49MB parts
         if zip_size > MAX_FILE_SIZE:
             await update.callback_query.edit_message_text("✂️ Splitting ZIP into 49MB parts...")
             
@@ -544,7 +649,6 @@ async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, fi
                     parts.append(part_path)
                     part_num += 1
             
-            # Send all parts with instructions
             instructions = (
                 "📦 ZIP archive split into 49MB parts\n\n"
                 f"Total parts: {len(parts)}\n\n"
@@ -571,7 +675,6 @@ async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, fi
                     )
                 cleanup_file(part_file)
         else:
-            # Send single ZIP file
             with open(zip_path, 'rb') as f:
                 await context.bot.send_document(
                     chat_id=update.effective_chat.id,
@@ -590,22 +693,20 @@ async def split_zip_parts(update: Update, context: ContextTypes.DEFAULT_TYPE, fi
             chat_id=update.effective_chat.id,
             text=f"❌ Error creating ZIP: {str(e)}"
         )
-        # Cleanup any partial ZIP parts that were created
-        logger.info(f"Cleaning up {len(parts)} partial ZIP parts after error")
         for part_file in parts:
             cleanup_file(part_file)
     
     finally:
-        # Always cleanup ZIP and original file and session
-        logger.info(f"Cleaning up ZIP archive: {zip_path}")
         cleanup_file(zip_path)
-        logger.info(f"Cleaning up original file: {file_path}")
         cleanup_file(file_path)
         user_id = update.effective_user.id if update.effective_user else None
         if user_id and user_id in user_sessions:
             del user_sessions[user_id]
 
 
+# ============================
+#      SEND FILE HELPER
+# ============================
 async def send_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: Path, file_size: int) -> None:
     """Send file to user."""
     if not update.effective_chat:
@@ -615,7 +716,7 @@ async def send_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_pat
         caption = f"✅ Download complete!\n📦 Size: {format_file_size(file_size)}"
         
         with open(file_path, 'rb') as f:
-            if file_path.suffix == '.mp3':
+            if file_path.suffix.lower() == '.mp3':
                 await context.bot.send_audio(
                     chat_id=update.effective_chat.id,
                     audio=f,
@@ -636,6 +737,9 @@ async def send_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_pat
         )
 
 
+# ============================
+#  VIDEO → MP3 CONVERSION
+# ============================
 async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle video files sent by user for conversion."""
     if not update.effective_user or not update.message or not update.message.video:
@@ -643,7 +747,6 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     user_id = update.effective_user.id
     
-    # Check if user is in convert mode
     if user_id not in user_sessions or user_sessions[user_id].get('mode') != 'convert':
         await update.message.reply_text(
             "Please select 🎵 Convert Video to MP3 from the menu first!",
@@ -651,23 +754,20 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
     
-    # Show processing message
     processing_msg = await update.message.reply_text("⏳ Downloading your video...")
     
     try:
-        # Download the video file
         video_file = await update.message.video.get_file()
         file_path = DOWNLOAD_DIR / f"user_{user_id}_video.mp4"
         await video_file.download_to_drive(str(file_path))
         
         await processing_msg.edit_text("🎵 Converting to MP3...")
         
-        # Convert to audio
         audio_path = DOWNLOAD_DIR / f"user_{user_id}_audio.mp3"
         
         cmd = [
             'ffmpeg', '-i', str(file_path),
-            '-vn',  # No video
+            '-vn',
             '-acodec', 'libmp3lame',
             '-b:a', '192k',
             str(audio_path)
@@ -677,8 +777,6 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         
         if audio_path.exists():
             audio_size = audio_path.stat().st_size
-            
-            # Send audio file
             if update.effective_chat:
                 with open(audio_path, 'rb') as f:
                     await context.bot.send_audio(
@@ -688,8 +786,6 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     )
             
             await processing_msg.delete()
-            
-            # Cleanup
             cleanup_file(file_path)
             cleanup_file(audio_path)
         else:
@@ -709,81 +805,85 @@ def cleanup_file(file_path: Path) -> None:
         logger.error(f"Error deleting file {file_path}: {e}")
 
 
+# ============================
+#         HELP COMMAND
+# ============================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send help message."""
     help_text = (
-        "📚 How to use this bot:\n\n"
-        "📹 Download Video:\n"
-        "1️⃣ Select 'Download Video' from the menu\n"
-        "2️⃣ Send a video link from YouTube, TikTok, Instagram, etc.\n"
-        "3️⃣ Choose quality (1080p, 720p, 480p, 360p, or MP3)\n"
-        "4️⃣ Receive your file!\n\n"
-        "🎵 Convert Video to MP3:\n"
-        "1️⃣ Select 'Convert Video to MP3' from the menu\n"
-        "2️⃣ Upload any video file\n"
-        "3️⃣ Receive MP3 audio!\n\n"
-        "📄 PDF to Text (OCR):\n"
-        "• Send me any PDF with printed English or Sinhala\n"
-        "• I will extract the text and send it back.\n\n"
-        "Supported platforms:\n"
-        "• YouTube\n"
-        "• TikTok\n"
-        "• Instagram\n"
-        "• Twitter/X\n"
-        "• Facebook\n"
-        "• Vimeo\n"
-        "• And many more!"
+        "📚 *How to use this bot:*\n\n"
+        "📹 *Download Video*\n"
+        "1. Tap '📹 Download Video'\n"
+        "2. Send a video link (YouTube, TikTok, Instagram, etc.)\n"
+        "3. Choose quality (1080p, 720p, 480p, 360p, or MP3)\n\n"
+        "🎵 *Convert Video to MP3*\n"
+        "1. Tap '🎵 Convert Video to MP3'\n"
+        "2. Upload any video file\n"
+        "3. Receive MP3 audio\n\n"
+        "🎧 *Download Music (Search)*\n"
+        "1. Tap '🎧 Download Music (Search)'\n"
+        "2. Send a song name + artist\n"
+        "3. I will search YouTube and send you the MP3\n\n"
+        "📄 *PDF to Text (OCR)*\n"
+        "• Send a PDF with printed English or Sinhala text\n"
+        "• I will extract the text\n\n"
+        "🖼️ *Image to Text (OCR)*\n"
+        "• Send a clear image with printed English or Sinhala text\n"
+        "• I will extract the text\n\n"
+        "Use the menu buttons below to switch features."
     )
     await update.message.reply_text(help_text, reply_markup=get_main_menu_keyboard())
 
 
+# ============================
+#            MAIN
+# ============================
 def main() -> None:
     """Start the bot."""
-    # Get bot token from environment variable
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
         print("\n❌ ERROR: TELEGRAM_BOT_TOKEN not found!")
-        print("Please set your Telegram bot token as an environment variable.")
-        print("\nTo get a token:")
-        print("1. Message @BotFather on Telegram")
-        print("2. Send /newbot and follow instructions")
-        print("3. Copy the token and add it to Replit Secrets")
         return
     
-    # Create the Application
     application = Application.builder().token(token).build()
     
-    # Register handlers
+    # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     
-    # Handle menu button selections
+    # Menu buttons
     application.add_handler(MessageHandler(
-        filters.Regex(r"^(📹 Download Video|🎵 Convert Video to MP3|📄 PDF to Text \(OCR\)|❓ Help)$"),
+        filters.Regex(r"^(📹 Download Video|🎵 Convert Video to MP3|🎧 Download Music \(Search\)|📄 PDF to Text \(OCR\)|🖼️ Image to Text \(OCR\)|❓ Help)$"),
         handle_menu_choice
     ))
     
-    # Handle video URLs (only in download mode)
+    # Text messages (URLs or music search)
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r"^(📹 Download Video|🎵 Convert Video to MP3|📄 PDF to Text \(OCR\)|❓ Help)$"),
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r"^(📹 Download Video|🎵 Convert Video to MP3|🎧 Download Music \(Search\)|📄 PDF to Text \(OCR\)|🖼️ Image to Text \(OCR\)|❓ Help)$"),
         handle_message
     ))
     
-    # Handle video files for conversion
+    # Video files for MP3 conversion
     application.add_handler(MessageHandler(
         filters.VIDEO,
         handle_video_file
     ))
     
-    # Handle PDF files for OCR (English + Sinhala)
+    # PDF files → OCR
     application.add_handler(MessageHandler(
         filters.Document.PDF,
         handle_pdf_ocr
     ))
     
-    # Handle callback queries (button presses)
+    # Photos → OCR
+    application.add_handler(MessageHandler(
+        filters.PHOTO,
+        handle_image_ocr
+    ))
+    
+    # Inline buttons (quality selection / split choice)
     application.add_handler(CallbackQueryHandler(
         handle_quality_selection,
         pattern="^quality_"
@@ -793,12 +893,9 @@ def main() -> None:
         pattern="^split_"
     ))
     
-    # Start the bot
     logger.info("🤖 Bot starting...")
-    print("\n✅ Telegram Video Downloader Bot is running!")
-    print("Send video links or PDFs to your bot to get started.\n")
+    print("\n✅ Telegram Bot is running!")
     
-    # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
