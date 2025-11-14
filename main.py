@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Media Butler Bot (Combined)
+Telegram Media Butler Bot
 
 Features:
 - Download videos from YouTube, TikTok, Instagram, Twitter, and other platforms
@@ -10,10 +10,8 @@ Features:
 - Image OCR (English + Sinhala)  -> uses ocr_image.py
 - PDF OCR (English + Sinhala)    -> uses ocr_pdf.py
 - Music search + download from YouTube as MP3 (song name)
-- Menu buttons at the bottom of chat
 
-Env:
-- TELEGRAM_BOT_TOKEN
+User-friendly button-based interface with main menu.
 """
 
 import os
@@ -57,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 50 * 1024 * 1024      # 50 MB
 PART_SIZE = 49 * 1024 * 1024          # 49 MB parts
-TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB (Telegram limit)
+TELEGRAM_MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2 GB
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -76,6 +74,19 @@ SUPPORTED_PLATFORMS = [
 
 # user_id -> session data
 user_sessions: Dict[int, Dict[str, Any]] = {}
+
+# ------------- Load cookies from env (optional) -------------
+
+# If you set YTDLP_COOKIES in Railway env vars with the content of cookies.txt,
+# this will create a cookies.txt file on startup.
+COOKIES_ENV = os.getenv("YTDLP_COOKIES")
+if COOKIES_ENV:
+    try:
+        with open("cookies.txt", "w", encoding="utf-8") as f:
+            f.write(COOKIES_ENV)
+        logger.info("cookies.txt created from YTDLP_COOKIES env var.")
+    except Exception as e:
+        logger.error(f"Failed to write cookies.txt from env: {e}")
 
 
 # ------------- Helpers -------------
@@ -101,8 +112,18 @@ def is_video_url(text: str) -> bool:
 
 
 def get_video_info(url: str) -> Optional[Dict[str, Any]]:
-    """Get video information using yt-dlp."""
-    ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": False}
+    """Get video information using yt-dlp (with optional cookies)."""
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
+        "noplaylist": True,
+    }
+
+    cookies_path = "cookies.txt"
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -135,9 +156,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🎵 *Convert Video to MP3* – upload a video file.\n"
         "📄 *PDF to Text (OCR)* – send a PDF file.\n"
         "🖼️ *Image Text (OCR)* – send an image.\n"
-        "🎧 *Download Music (Search)* – type song name.\n\n"
-        "💡 Tip: You can also *just paste a video link* directly, "
-        "I’ll detect it and ask for quality."
+        "🎧 *Download Music (Search)* – type song name.\n"
     )
     await update.message.reply_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
@@ -190,7 +209,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "🎧 *Music Download Mode*\n\n"
             "Send me a song name, artist name, or both.\n"
-            "Examples:\n"
+            "Example:\n"
             "_Shape of You Ed Sheeran_\n"
             "_Dinakage Sithin - Kasun Kalhara_",
             parse_mode="Markdown",
@@ -203,28 +222,13 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ------------- Text messages (URLs / music queries) -------------
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Route plain text based on:
-    - If it looks like a video URL → always treat as video download (like first bot)
-    - Else, if mode == music → treat as music search
-    - Else, ask user to pick from menu
-    """
+    """Route plain text based on current mode."""
     if not update.message or not update.effective_user:
         return
 
     user_id = update.effective_user.id
-    message_text = update.message.text.strip()
+    message_text = update.message.text
 
-    # 1️⃣ If it's a supported video URL → always go to video download flow
-    if is_video_url(message_text):
-        # keep any existing session info but ensure mode=download
-        session = user_sessions.get(user_id, {})
-        session["mode"] = "download"
-        user_sessions[user_id] = session
-        await handle_video_url(update, context)
-        return
-
-    # 2️⃣ Otherwise, route by current mode
     session = user_sessions.get(user_id, {})
     mode = session.get("mode")
 
@@ -234,13 +238,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await download_music_by_search(update, context, user_id, message_text, waiting_msg)
         return
 
-    # (You could add more text-based modes here later)
+    # Video download mode
+    if mode == "download":
+        await handle_video_url(update, context)
+        return
 
-    # 3️⃣ No match → ask user to use menu
+    # If no mode or other mode
     await update.message.reply_text(
-        "I’m not sure what to do with that.\n\n"
-        "• Paste a video link to download\n"
-        "• Or choose from the menu below 👇",
+        "Please pick what you want to do from the menu 👇",
         reply_markup=get_main_menu_keyboard(),
     )
 
@@ -268,7 +273,8 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not video_info:
         await processing_msg.edit_text(
             "❌ I couldn't process this link.\n"
-            "Make sure the video is public and the URL is correct."
+            "Make sure the video is public and the URL is correct.\n\n"
+            "Some videos may also require login / cookies (age-restricted or protected)."
         )
         return
 
@@ -364,6 +370,7 @@ async def download_video(
             ],
             "quiet": True,
             "no_warnings": True,
+            "noplaylist": True,
         }
     else:
         output_path = DOWNLOAD_DIR / f"{safe_filename}.mp4"
@@ -375,7 +382,13 @@ async def download_video(
             "merge_output_format": "mp4",
             "quiet": True,
             "no_warnings": True,
+            "noplaylist": True,
         }
+
+    # Attach cookies if cookies.txt exists
+    cookies_path = "cookies.txt"
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -402,9 +415,17 @@ async def download_video(
 
     except Exception as e:
         logger.error(f"Download error: {e}")
-        await update.callback_query.edit_message_text(
-            f"❌ Download failed:\n{e}\n\nTry another link."
-        )
+        msg = str(e)
+        if "Sign in to confirm you’re not a bot" in msg or "Sign in to confirm you're not a bot" in msg:
+            text = (
+                "❌ I can't download this video.\n\n"
+                "YouTube is asking to *sign in to confirm you're not a bot*.\n"
+                "This usually happens for protected / limited videos or when the server IP looks like a bot.\n\n"
+                "👉 Try a different video, or configure cookies (YTDLP_COOKIES)."
+            )
+        else:
+            text = f"❌ Download failed:\n{msg}\n\nTry another link."
+        await update.callback_query.edit_message_text(text)
 
 
 # ------------- Large file splitting -------------
@@ -777,6 +798,10 @@ async def download_music_by_search(
         ],
     }
 
+    cookies_path = "cookies.txt"
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query_text, download=True)
@@ -846,8 +871,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (
         "📚 *How to use this bot*\n\n"
         "📹 *Download Video*\n"
-        "1. Tap 'Download Video' or just paste a video link\n"
-        "2. Choose quality (1080p, 720p, 480p, 360p, or MP3)\n\n"
+        "1. Tap 'Download Video'\n"
+        "2. Send a video link\n"
+        "3. Choose quality or MP3\n\n"
         "🎵 *Convert Video to MP3*\n"
         "1. Tap 'Convert Video to MP3'\n"
         "2. Upload a video file\n\n"
@@ -869,6 +895,7 @@ def main() -> None:
 
     app = Application.builder().token(token).build()
 
+    # /start + /help
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
 
