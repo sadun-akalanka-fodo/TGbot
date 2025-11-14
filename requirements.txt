@@ -6,4 +6,6 @@ tinydb
 aiohttp
 python-dotenv
 yt-dlp
+pytesseract
+pdf2image
 
