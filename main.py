@@ -22,7 +22,7 @@ import zipfile
 from typing import Dict, Any, Optional
 from pathlib import Path
 from datetime import datetime
-import asyncio  # ✅ for parallel work
+import asyncio  # for parallel work
 
 from telegram import (
     Update,
@@ -313,7 +313,7 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     processing_msg = await update.message.reply_text("🔍 Analyzing video link...")
 
-    # ✅ run get_video_info in background thread
+    # run get_video_info in background thread
     video_info = await asyncio.to_thread(get_video_info, message_text)
     if not video_info:
         log_action(user, "video_info_failed", message_text)
@@ -443,7 +443,7 @@ async def download_video(
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        # ✅ run yt-dlp in background thread
+        # run yt-dlp in background thread
         def _dl():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
@@ -571,7 +571,7 @@ async def split_video_parts(
     """Split video into multiple 49MB parts and send each as playable Telegram video."""
     parts = []
     try:
-        # ffprobe total duration (✅ in thread)
+        # ffprobe total duration in thread
         cmd = [
             "ffprobe",
             "-v",
@@ -875,7 +875,7 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "192k",
             str(out_path),
         ]
-        # ✅ ffmpeg in background
+        # ffmpeg in background
         await asyncio.to_thread(subprocess.run, cmd, capture_output=True, check=True)
 
         if out_path.exists():
@@ -931,7 +931,7 @@ async def download_music_by_search(
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        # ✅ yt-dlp in thread
+        # yt-dlp in thread
         def _music_dl():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(query_text, download=True)
@@ -1108,7 +1108,8 @@ def main() -> None:
         print("Set TELEGRAM_BOT_TOKEN env var and restart.")
         return
 
-    app = Application.builder().token(token).build()
+    # ✅ allow processing multiple updates in parallel
+    app = Application.builder().token(token).concurrent_updates(True).build()
 
     # /start + /help + /log
     app.add_handler(CommandHandler("start", start))
