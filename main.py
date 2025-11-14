@@ -19,6 +19,7 @@ import logging
 import re
 import subprocess
 import zipfile
+import asyncio   # 🔹 added
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -588,6 +589,8 @@ async def split_video_parts(
             user_sessions.pop(update.effective_user.id, None)
 
 
+# ------------- ZIP splitting (patched) -------------
+
 async def split_zip_parts(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -631,14 +634,37 @@ async def split_zip_parts(
                 text=instructions,
             )
 
+            # 🔧 patched upload loop: retries + delays + bigger timeouts
             for idx, p in enumerate(parts, 1):
                 size = p.stat().st_size
-                with open(p, "rb") as f:
-                    await context.bot.send_document(
+                caption = f"Part {idx}/{len(parts)} - {format_file_size(size)}"
+
+                sent = False
+                attempts = 0
+                while not sent and attempts < 3:
+                    attempts += 1
+                    try:
+                        with open(p, "rb") as f:
+                            await context.bot.send_document(
+                                chat_id=update.effective_chat.id,
+                                document=f,
+                                caption=caption,
+                                write_timeout=300,
+                                read_timeout=300,
+                                connect_timeout=300,
+                            )
+                        sent = True
+                    except Exception as e:
+                        logger.error(f"Upload failed for ZIP part {idx}, attempt {attempts}: {e}")
+                        await asyncio.sleep(2)  # wait and retry
+
+                if not sent:
+                    await context.bot.send_message(
                         chat_id=update.effective_chat.id,
-                        document=f,
-                        caption=f"Part {idx}/{len(parts)} - {format_file_size(size)}",
+                        text=f"❌ Failed uploading ZIP part {idx}. Skipping this part.",
                     )
+
+                await asyncio.sleep(1)  # small delay between parts
                 cleanup_file(p)
         else:
             with open(zip_path, "rb") as f:
@@ -646,6 +672,9 @@ async def split_zip_parts(
                     chat_id=update.effective_chat.id,
                     document=f,
                     caption=f"🗜️ ZIP Archive - {format_file_size(zip_size)}",
+                    write_timeout=300,
+                    read_timeout=300,
+                    connect_timeout=300,
                 )
 
         await context.bot.send_message(
