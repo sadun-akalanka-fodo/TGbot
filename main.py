@@ -436,44 +436,75 @@ async def download_music_by_search(
     waiting_msg
 ) -> None:
     """Search YouTube for a song and download best audio as MP3."""
-    # Safe filename based on query
+    # Safe base name
     safe_query = re.sub(r'[^\w\s-]', '', query_text).strip()
     safe_query = re.sub(r'[-\s]+', '_', safe_query)[:50] or f"user_{user_id}_song"
-    output_path = DOWNLOAD_DIR / f"{safe_query}.mp3"
+
+    # Let yt-dlp decide the extension, we will locate the final file after post-processing
+    out_tmpl = str(DOWNLOAD_DIR / f"{safe_query}.%(ext)s")
 
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': str(output_path),
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'ytsearch1',  # search and pick first result
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
+        "format": "bestaudio/best",
+        "outtmpl": out_tmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "default_search": "ytsearch1",  # search and pick first result
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
         }],
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query_text, download=True)
-        
-        if not output_path.exists():
+
+        # --- Figure out the actual output file path ---
+        candidate: Path | None = None
+
+        # 1) Try to read filepath from yt-dlp info (newer versions)
+        if isinstance(info, dict):
+            # If it's a search, info might be a playlist-like structure
+            if "requested_downloads" in info and info["requested_downloads"]:
+                fp = info["requested_downloads"][0].get("filepath")
+                if fp:
+                    candidate = Path(fp)
+
+        # 2) Fallback: assume mp3 with our base name
+        if candidate is None:
+            candidate = DOWNLOAD_DIR / f"{safe_query}.mp3"
+
+        # 3) If still not there, glob any mp3 that starts with our base name
+        if not candidate.exists():
+            matches = list(DOWNLOAD_DIR.glob(f"{safe_query}*.mp3"))
+            if matches:
+                candidate = matches[0]
+
+        # 4) If STILL nothing, log and tell user
+        if not candidate.exists():
+            logger.error(
+                "Music download: file not found for query '%s'. Files in downloads: %s",
+                query_text,
+                [p.name for p in DOWNLOAD_DIR.glob('*')]
+            )
             await waiting_msg.edit_text("❌ Failed to download song. Try another name?")
             return
-        
-        file_size = output_path.stat().st_size
-        await waiting_msg.edit_text("✅ Found and downloaded! Uploading to Telegram...")
-        
-        await send_file(update, context, output_path, file_size)
-        cleanup_file(output_path)
 
-        # Keep mode = music so user can send another song name
+        file_size = candidate.stat().st_size
+        await waiting_msg.edit_text("✅ Found and downloaded! Uploading to Telegram...")
+
+        # Reuse your existing helper
+        await send_file(update, context, candidate, file_size)
+
+        # Cleanup
+        cleanup_file(candidate)
 
     except Exception as e:
         logger.error(f"Music download error: {e}")
         await waiting_msg.edit_text(f"❌ Error downloading music:\n{e}")
+
 
 
 # ============================
