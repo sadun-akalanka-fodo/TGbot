@@ -21,7 +21,8 @@ import subprocess
 import zipfile
 from typing import Dict, Any, Optional
 from pathlib import Path
-from datetime import datetime  # ✅ added
+from datetime import datetime
+import asyncio  # ✅ for parallel work
 
 from telegram import (
     Update,
@@ -108,8 +109,6 @@ def log_action(user, action: str, details: str = "") -> None:
 
 # ------------- Load cookies from env (optional) -------------
 
-# If you set YTDLP_COOKIES in Railway env vars with the content of cookies.txt,
-# this will create a cookies.txt file on startup.
 COOKIES_ENV = os.getenv("YTDLP_COOKIES")
 if COOKIES_ENV:
     try:
@@ -314,7 +313,8 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     processing_msg = await update.message.reply_text("🔍 Analyzing video link...")
 
-    video_info = get_video_info(message_text)
+    # ✅ run get_video_info in background thread
+    video_info = await asyncio.to_thread(get_video_info, message_text)
     if not video_info:
         log_action(user, "video_info_failed", message_text)
         await processing_msg.edit_text(
@@ -438,14 +438,17 @@ async def download_video(
             "noplaylist": True,
         }
 
-    # Attach cookies if cookies.txt exists
     cookies_path = "cookies.txt"
     if os.path.exists(cookies_path):
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        # ✅ run yt-dlp in background thread
+        def _dl():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+        await asyncio.to_thread(_dl)
 
         if quality == "audio":
             files = list(DOWNLOAD_DIR.glob(f"{safe_filename}*.mp3"))
@@ -568,6 +571,7 @@ async def split_video_parts(
     """Split video into multiple 49MB parts and send each as playable Telegram video."""
     parts = []
     try:
+        # ffprobe total duration (✅ in thread)
         cmd = [
             "ffprobe",
             "-v",
@@ -578,7 +582,7 @@ async def split_video_parts(
             "default=noprint_wrappers=1:nokey=1",
             str(file_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
         total_duration = float(result.stdout.strip() or "0")
 
         current_time = 0.0
@@ -601,7 +605,7 @@ async def split_video_parts(
                 "1",
                 str(out_file),
             ]
-            subprocess.run(cmd, capture_output=True, text=True)
+            await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
 
             if out_file.exists() and out_file.stat().st_size > 0:
                 parts.append(out_file)
@@ -616,7 +620,9 @@ async def split_video_parts(
                     "default=noprint_wrappers=1:nokey=1",
                     str(out_file),
                 ]
-                res_dur = subprocess.run(cmd_dur, capture_output=True, text=True)
+                res_dur = await asyncio.to_thread(
+                    subprocess.run, cmd_dur, capture_output=True, text=True
+                )
                 try:
                     part_dur = float(res_dur.stdout.strip() or "0")
                     current_time += part_dur
@@ -645,7 +651,9 @@ async def split_video_parts(
                     "default=noprint_wrappers=1:nokey=1",
                     str(p),
                 ]
-                meta_res = subprocess.run(cmd_meta, capture_output=True, text=True)
+                meta_res = await asyncio.to_thread(
+                    subprocess.run, cmd_meta, capture_output=True, text=True
+                )
                 if meta_res.returncode == 0:
                     lines = [ln.strip() for ln in meta_res.stdout.splitlines() if ln.strip()]
                     if len(lines) >= 2:
@@ -867,7 +875,8 @@ async def handle_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "192k",
             str(out_path),
         ]
-        subprocess.run(cmd, capture_output=True, check=True)
+        # ✅ ffmpeg in background
+        await asyncio.to_thread(subprocess.run, cmd, capture_output=True, check=True)
 
         if out_path.exists():
             size = out_path.stat().st_size
@@ -922,8 +931,12 @@ async def download_music_by_search(
         ydl_opts["cookiefile"] = cookies_path
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query_text, download=True)
+        # ✅ yt-dlp in thread
+        def _music_dl():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(query_text, download=True)
+
+        info = await asyncio.to_thread(_music_dl)
 
         yt_title = None
         if isinstance(info, dict):
@@ -1024,7 +1037,7 @@ async def handle_cookies_document(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(f"❌ Failed to save cookies.txt: {e}")
 
 
-# ------------- /log command (show recent actions) -------------
+# ------------- /log command -------------
 
 async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -1053,7 +1066,6 @@ async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         last_lines = lines[-30:]
         text = "📜 *Recent actions (last 30 lines):*\n\n" + "".join(last_lines)
 
-        # send as plain text to avoid escaping issues
         await update.message.reply_text(text)
         log_action(user, "log_view_ok", f"lines={len(last_lines)}")
     except Exception as e:
@@ -1117,7 +1129,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_image_ocr))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_ocr))
 
-    # 🔐 Cookies upload (non-PDF documents, e.g. cookies.txt)
+    # Cookies upload (non-PDF documents, e.g. cookies.txt)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_cookies_document))
 
     # Video files for conversion
