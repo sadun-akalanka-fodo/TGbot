@@ -275,7 +275,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Music search mode
     if mode == "music":
         log_action(user, "music_query", message_text)
-        waiting_msg = await update.message.reply_text("🎧 Searching YouTube for your song...")
+        waiting_msg = await update.message.reply_text("🎧🔍 Searching for your song…")
         await download_music_by_search(update, context, user_id, message_text, waiting_msg)
         return
 
