@@ -808,6 +808,11 @@ async def send_file(
                     audio=f,
                     caption=caption,
                     title=display_name,
+                    # ✅ FIX: bigger timeouts for big MP3 uploads
+                    read_timeout=120,
+                    write_timeout=600,
+                    connect_timeout=30,
+                    pool_timeout=30,
                 )
             else:
                 await context.bot.send_video(
@@ -815,6 +820,11 @@ async def send_file(
                     video=f,
                     caption=caption,
                     supports_streaming=True,
+                    # ✅ FIX: bigger timeouts for big MP4 uploads
+                    read_timeout=120,
+                    write_timeout=600,
+                    connect_timeout=30,
+                    pool_timeout=30,
                 )
         log_action(user, "file_sent", f"{file_path.name} size={file_size}")
     except Exception as e:
