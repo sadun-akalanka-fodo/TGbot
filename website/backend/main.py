@@ -813,8 +813,9 @@ def _do_selective_blur_clean(in_path, out_path, final_video_path, intensity, sel
         "ffmpeg", "-y",
         "-i", str(out_path),
         "-i", str(in_path),
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-        "-c:a", "aac", "-shortest",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k", "-shortest",
+        "-movflags", "+faststart",
         str(final_video_path),
     ]
     subprocess.run(cmd, capture_output=True)
