@@ -1,0 +1,20 @@
+[Unit]
+Description=AlphaMedia egress forward proxy (long-lived upstream credential)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/hatch/workspace/tgbot/systemd
+# Long-lived upstream credential lives in /home/hatch/.config/alphamedia-egress-fwd/env
+# (0600, NOT in git). The unit file itself carries no secrets.
+EnvironmentFile=/home/hatch/.config/alphamedia-egress-fwd/env
+ExecStart=/usr/bin/python3 /home/hatch/workspace/tgbot/systemd/alphamedia-egress-fwd.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/alphamedia-egress-fwd.log
+StandardError=append:/var/log/alphamedia-egress-fwd.log
+
+[Install]
+WantedBy=multi-user.target
